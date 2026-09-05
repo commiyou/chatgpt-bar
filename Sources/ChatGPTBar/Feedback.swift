@@ -62,30 +62,6 @@ final class Feedback {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// Long, scrollable output (selector probe / DOM dump) instead of an
-    /// unbounded NSAlert body.
-    func showText(title: String, body: String, extraButton: (title: String, handler: () -> Void)? = nil) {
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 560, height: 320))
-            textView.isEditable = false
-            textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            textView.string = body
-
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 320))
-            scroll.hasVerticalScroller = true
-            scroll.documentView = textView
-
-            let alert = NSAlert()
-            alert.messageText = title
-            alert.accessoryView = scroll
-            alert.addButton(withTitle: "关闭")
-            if let extraButton { alert.addButton(withTitle: extraButton.title) }
-            let response = alert.runModal()
-            if response == .alertSecondButtonReturn { extraButton?.handler() }
-        }
-    }
-
     private func showHUD(_ message: String, kind: Kind) {
         dismissWork?.cancel()
         hud?.orderOut(nil)

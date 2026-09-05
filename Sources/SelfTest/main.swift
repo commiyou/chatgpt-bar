@@ -40,6 +40,27 @@ do {
 // MARK: - Settings persistence and migration
 
 do {
+    // A payload written by the shipping app, to catch decode regressions where
+    // a boolean silently falls back to its default.
+    let real = """
+    {"pinned":false,"copyLastResponseShortcut":{"modifiers":768,"keyCode":8},"nonActivating":false,\
+    "longConversationOptimization":false,"pinShortcut":{"modifiers":256,"keyCode":35},\
+    "selectors":{"overrides":{}},"newChatShortcut":{"modifiers":768,"keyCode":45},\
+    "proxy":{"port":0,"host":"","enabled":false},"homeURL":"https://chatgpt.com","schemaVersion":2,\
+    "panelFrame":"{{1012, 293}, {818, 748}}","newTempChatShortcut":{"modifiers":768,"keyCode":17},\
+    "toggleShortcut":{"keyCode":1,"modifiers":2048},"allowURLSchemeAutoSend":false}
+    """
+    let store = InMemoryStore()
+    store.set(Data(real.utf8), forKey: SettingsStore.settingsKey)
+    let decoded = SettingsStore(store: store).settings
+    checkEqual(decoded.nonActivating, false, "persisted nonActivating=false survives decode")
+    checkEqual(decoded.allowURLSchemeAutoSend, false, "persisted auto-send=false survives decode")
+    checkEqual(decoded.pinned, false, "persisted pinned=false survives decode")
+    checkEqual(decoded.toggleShortcut, Shortcut(keyCode: 1, modifiers: CarbonModifier.option), "persisted toggle shortcut decoded")
+    checkEqual(decoded.panelFrame, "{{1012, 293}, {818, 748}}", "persisted panel frame decoded")
+}
+
+do {
     let store = InMemoryStore()
     let first = SettingsStore(store: store)
     checkEqual(first.settings.allowURLSchemeAutoSend, false, "auto-send defaults to off")

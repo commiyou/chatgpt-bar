@@ -1,7 +1,8 @@
 import Foundation
 
 /// Developer/QA launch flags:
-/// `--settings`                 open the settings window on launch
+/// `--settings [tab]`           open the settings window on launch
+///                             (tab: general | shortcuts | page)
 /// `--dev-report <path>`        write a JSON diagnostic report
 /// `--url <url>`               page to diagnose instead of the home page
 /// `--settle <seconds>`        how long to sample frame gaps (default 6)
@@ -11,6 +12,7 @@ import Foundation
 /// `--exit-after-report`       quit once the report is written
 struct LaunchOptions {
     var openSettings = false
+    var settingsTab: SettingsTab = .general
     var reportPath: String?
     var url: URL?
     var settle: TimeInterval = 6
@@ -32,6 +34,10 @@ struct LaunchOptions {
             switch argument {
             case "--settings":
                 options.openSettings = true
+                if index + 1 < arguments.count, let tab = SettingsTab(rawValue: arguments[index + 1]) {
+                    options.settingsTab = tab
+                    index += 1
+                }
             case "--dev-report":
                 options.reportPath = next()
             case "--url":

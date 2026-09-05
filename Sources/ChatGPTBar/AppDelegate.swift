@@ -132,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController.show()
 
         if launchOptions.openSettings {
-            openSettings()
+            settingsController.show(tab: launchOptions.settingsTab)
         }
         if let path = launchOptions.reportPath {
             runDevReport(path: path)

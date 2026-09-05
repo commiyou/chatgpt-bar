@@ -36,7 +36,8 @@ chatgpt-bar/
 │   │   ├── ChatWebController.swift
 │   │   ├── PopupWindowController.swift
 │   │   ├── StatusItemController.swift
-│   │   ├── SettingsWindowController.swift
+│   │   ├── SettingsWindowController.swift  # NSWindow + NSHostingView 宿主
+│   │   ├── SettingsView.swift  # SwiftUI 设置界面与草稿状态
 │   │   ├── HotKeyCenter.swift
 │   │   ├── ShortcutRouter.swift
 │   │   ├── LaunchOptions.swift # 诊断开关与报告落盘
@@ -51,7 +52,7 @@ chatgpt-bar/
 ```sh
 sh scripts/build.sh          # 产出 dist/ChatGPT Bar.app（ad-hoc 签名）
 open "dist/ChatGPT Bar.app"
-swift run SelfTest           # 57 项纯逻辑检查
+swift run SelfTest           # 62 项纯逻辑检查
 ```
 
 `swift build` 的最低系统版本由 `Package.swift` 的 `platforms: [.macOS(.v13)]` 决定，与 `Info.plist` 的 `LSMinimumSystemVersion` 一致。
@@ -62,7 +63,7 @@ swift run SelfTest           # 57 项纯逻辑检查
 
 ```sh
 BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
-"$BIN" --settings                                   # 启动即打开设置窗口
+"$BIN" --settings [general|shortcuts|page]          # 启动即打开设置窗口（可指定标签页）
 "$BIN" --url "https://chatgpt.com/c/<id>"           # 指定初始页面
 "$BIN" --dev-report /tmp/r.json --settle 10 --ab \
        --exit-after-report                          # 采样一次并写 JSON 报告
@@ -77,6 +78,9 @@ BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
 ### 设置：单一来源
 
 `AppSettings` 是一个 `Codable` 结构，整体以 JSON 写入 `UserDefaults`（键 `settings.json`），带 `schemaVersion`。设置窗口编辑的是草稿副本，只有点“保存并应用”才提交，`AppDelegate.apply(_:)` 对比新旧值决定要不要重建页面桥、重载页面、重建面板、重注册热键。
+
+界面用 SwiftUI 的 `Form` + `.formStyle(.grouped)` 实现，分为通用 / 快捷键 / 页面适配三个标签页，由 `NSHostingView` 挂在普通 `NSWindow` 上：分组卡片、右对齐控件、每组下方脚注、底部操作栏，和系统设置的观感一致。检测结果与性能报告走 SwiftUI sheet（可选中文本 + 复制按钮），不再塞进 `NSAlert` 的 accessory view。
+`AppDelegate` 只依赖 `SettingsWindowController.Environment` 这一组闭包，界面层可以整体替换而不动业务代码。
 
 快捷键用 `Shortcut?` 表示，`nil` 才是“未设置”。原型把 `0` 当未设置，因此 `A` 键（keyCode 0）和无修饰键组合永远存不下来。
 
@@ -155,13 +159,14 @@ schema 2 迁移会把原型写下的那批过期选择器当作“出厂默认�
 尚未实测：
 
 - Services 菜单项。`pbs -dump_pboard` 能看到服务已注册（`NSMessage = sendToChatGPT`），但 TextEdit 的服务菜单里不出现，`NSPerformService` 从脚本调用返回 false。原因是 Launch Services 把同 bundle id 的服务路由给了旧原型 bundle（见下），改 id 后条目独立注册，但仍需在系统设置里启用服务或给 app 正式签名，属于系统侧开关。
+  旧 bundle 已从 Launch Services 注销并移入废纸篓后重测：注册表里只剩 `dev.local.chatgptbar` 一条（`NSPortName = ChatGPTBar`），但 TextEdit 的服务菜单仍不出现，`NSPerformService` 仍返回 false。下一步是看系统设置 → 键盘 → 服务里的开关，或先做正式签名。
 - OAuth 弹窗登录、麦克风授权。
 - macOS 14+ 代理路径（本机 15.x，未接真实代理验证）。
 
 ## 已知限制
 
 - bundle id 已从原型的 `com.local.chatgptbar` 改成 `dev.local.chatgptbar`：两个 bundle 声明同一个 id 时，Launch Services 会把 Services 和 URL Scheme 路由到它先解析到的那一个（实测路由到了旧 bundle）。设置读取会回退到旧域名，所以配置不丢。
-- URL Scheme `chatgptbar` 仍与旧原型冲突，只要旧 app 还在，`open chatgptbar://...` 的落点就不确定，建议删掉旧 bundle。
+- 旧原型 bundle（`src/new/personal/chatgpt-bar/dist/ChatGPT Bar.app`）已移入废纸篓并从 Launch Services 注销，URL Scheme 与 Services 的归属不再歧义。
 - 没有应用图标（缺 `CFBundleIconFile` 资源），菜单栏用 SF Symbol。
 - ad-hoc 签名、未启用 hardened runtime；分发需要自行配置签名与公证。
 - `chatgpt.com` DOM 会变化，选择器仍然是需要人工维护的部分：先跑“检测选择器”，MISS 的用“导出 DOM 候选”更新。
