@@ -12,7 +12,7 @@ final class ChatWebController: NSObject {
     private(set) var webView: WKWebView!
 
     private let userContentController = WKUserContentController()
-    private let policy = NavigationPolicy()
+    private var policy: NavigationPolicy
     private var popups: [PopupWindowController] = []
     private var errorOverlay: ErrorOverlayView?
 
@@ -20,10 +20,18 @@ final class ChatWebController: NSObject {
     private let pendingLimit = 16
     private(set) var isPageReady = false
 
+    private var navigationStartedAt: CFAbsoluteTime?
+    private(set) var lastLoadSeconds: Double?
+    private(set) var lastCommitSeconds: Double?
+
     private var homeURL: URL
+    /// Remembered so retry-after-failure reloads the page that failed instead
+    /// of silently falling back to the home page.
+    private var lastRequestedURL: URL?
 
     init(settings: AppSettings) {
         self.homeURL = settings.resolvedHomeURL
+        self.policy = ChatWebController.makePolicy(homeURL: settings.resolvedHomeURL)
         super.init()
 
         let configuration = WKWebViewConfiguration()
@@ -33,7 +41,7 @@ final class ChatWebController: NSObject {
         configuration.applicationNameForUserAgent = "ChatGPTBar/\(AppInfo.shortVersion)"
         configuration.preferences.isElementFullscreenEnabled = true
 
-        installBridge(selectors: settings.selectors)
+        installScripts(settings: settings)
 
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
@@ -51,20 +59,36 @@ final class ChatWebController: NSObject {
         ])
     }
 
+    /// The configured home page must stay in the panel even when it is not on
+    /// the default allow list.
+    private static func makePolicy(homeURL: URL) -> NavigationPolicy {
+        var suffixes = NavigationPolicy.defaultAllowedHostSuffixes
+        if let host = homeURL.host, !host.isEmpty, !suffixes.contains(host) {
+            suffixes.append(host)
+        }
+        return NavigationPolicy(allowedHostSuffixes: suffixes)
+    }
+
     // MARK: - Loading
 
     func loadHome(_ url: URL? = nil) {
-        if let url { homeURL = url }
+        if let url {
+            homeURL = url
+            policy = ChatWebController.makePolicy(homeURL: url)
+        }
         hideErrorOverlay()
+        lastRequestedURL = homeURL
         webView.load(URLRequest(url: homeURL))
     }
 
     func reload() {
         hideErrorOverlay()
-        if webView.url == nil {
-            loadHome()
-        } else {
+        if webView.url != nil {
             webView.reload()
+        } else if let last = lastRequestedURL {
+            webView.load(URLRequest(url: last))
+        } else {
+            loadHome()
         }
     }
 
@@ -72,18 +96,37 @@ final class ChatWebController: NSObject {
         NSWorkspace.shared.open(webView.url ?? homeURL)
     }
 
-    /// Rebuilds the injected bridge after the selectors change.
-    func rebuildBridge(selectors: SelectorSet) {
-        installBridge(selectors: selectors)
+    /// Loads an arbitrary page (diagnostics); keeps the configured home intact.
+    func load(url: URL) {
+        if let host = url.host, !policy.isAllowedHost(host) {
+            policy = NavigationPolicy(allowedHostSuffixes: policy.allowedHostSuffixes + [host])
+        }
+        hideErrorOverlay()
+        isPageReady = false
+        lastRequestedURL = url
+        webView.load(URLRequest(url: url))
+    }
+
+    /// Rebuilds the injected scripts after selectors or rendering options change.
+    func rebuildScripts(settings: AppSettings) {
+        installScripts(settings: settings)
         isPageReady = false
         webView.reload()
     }
 
-    private func installBridge(selectors: SelectorSet) {
+    private func installScripts(settings: AppSettings) {
         userContentController.removeAllUserScripts()
         userContentController.addUserScript(
             WKUserScript(
-                source: BridgeScript.source(selectors: selectors),
+                source: BridgeScript.source(selectors: settings.selectors),
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
+        guard settings.longConversationOptimization else { return }
+        userContentController.addUserScript(
+            WKUserScript(
+                source: RenderTweaks.source(selectors: settings.selectors),
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
@@ -92,8 +135,9 @@ final class ChatWebController: NSObject {
 
     // MARK: - Bridge plumbing
 
-    /// Queues work until the first navigation finishes, replacing the
-    /// prototype's fixed 0.4s guess.
+    /// Queues work until the document is committed (not until the load event):
+    /// a heavy conversation can keep loading subresources for a minute, and
+    /// waiting for `didFinish` would stall every insert until then.
     private func whenReady(_ block: @escaping () -> Void) {
         if isPageReady {
             block()
@@ -215,6 +259,144 @@ final class ChatWebController: NSObject {
         }
     }
 
+    // MARK: - Diagnostics
+
+    func metrics(completion: @escaping (BridgeResponse) -> Void) {
+        call("return window.\(BridgeScript.globalName).metrics();", completion: completion)
+    }
+
+    func clearComposer(completion: ((BridgeResponse) -> Void)? = nil) {
+        call("return window.\(BridgeScript.globalName).clear();") { response in completion?(response) }
+    }
+
+    /// The send button only exists while the composer has content, so probing
+    /// it requires typing first.
+    func probeComposer(completion: @escaping ([String: Any]) -> Void) {
+        insert(text: "chatgpt-bar selector probe", mode: .replace, submit: false) { [weak self] inserted in
+            guard let self else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.probeSelectors { probe in
+                    self.dumpDOMCandidates { dump in
+                        self.clearComposer { cleared in
+                            completion([
+                                "inserted": inserted.isOK,
+                                "insertError": inserted.error ?? "",
+                                "cleared": cleared.isOK,
+                                "selectorProbe": probe,
+                                "domCandidates": dump
+                            ])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Samples frame gaps during a deterministic scroll sweep, then reports
+    /// jank plus page metrics.
+    func samplePerformance(duration: TimeInterval, completion: @escaping ([String: Any]) -> Void) {
+        call("return window.\(BridgeScript.globalName).perfStart();") { [weak self] started in
+            guard let self else { return }
+            guard started.isOK else {
+                completion(["error": BridgeErrorText.describe(started.error)])
+                return
+            }
+            self.call(
+                "return await window.\(BridgeScript.globalName).scrollBench(durationMs);",
+                arguments: ["durationMs": Int(duration * 1000)]
+            ) { scrolled in
+                self.call("return window.\(BridgeScript.globalName).perfStop();") { stopped in
+                    self.metrics { metrics in
+                        var result: [String: Any] = [:]
+                        result["jank"] = stopped.value ?? ["error": BridgeErrorText.describe(stopped.error)]
+                        result["page"] = metrics.value ?? ["error": BridgeErrorText.describe(metrics.error)]
+                        result["scroll"] = scrolled.value ?? ["error": BridgeErrorText.describe(scrolled.error)]
+                        if let seconds = self.lastLoadSeconds {
+                            result["uiLoadSeconds"] = (seconds * 1000).rounded() / 1000
+                        }
+                        completion(result)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Waits until the conversation is actually rendered, then samples and probes.
+    /// The page may already be loading from `--url` at launch.
+    func runDiagnostics(url: URL?, settle: TimeInterval, completion: @escaping ([String: Any]) -> Void) {
+        if let url, webView.url != url { load(url: url) }
+        measurePass(settle: settle, includeProbes: true, completion: completion)
+    }
+
+    /// One measurement pass: wait for commit, wait for the conversation to be
+    /// rendered, then sample scroll jank. Both A/B passes use this so the
+    /// numbers are comparable.
+    func measurePass(settle: TimeInterval, includeProbes: Bool, completion: @escaping ([String: Any]) -> Void) {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        waitUntilReady(deadline: Date().addingTimeInterval(90)) { [weak self] ready in
+            guard let self else { return }
+            guard ready else {
+                completion(["error": "document was not committed within 90s"])
+                return
+            }
+            self.waitForTurns(deadline: Date().addingTimeInterval(90)) { turns in
+                let timeToTurns = CFAbsoluteTimeGetCurrent() - startedAt
+                self.samplePerformance(duration: settle) { sample in
+                    var report = sample
+                    report["timeToFirstTurnSeconds"] = (timeToTurns * 1000).rounded() / 1000
+                    report["turnsWhenRendered"] = turns
+                    if let commit = self.lastCommitSeconds {
+                        report["documentCommitSeconds"] = (commit * 1000).rounded() / 1000
+                    }
+                    guard includeProbes else {
+                        completion(report)
+                        return
+                    }
+                    self.probeSelectors { probe in
+                        self.dumpDOMCandidates { dump in
+                            report["selectorProbe"] = probe
+                            report["domCandidates"] = dump
+                            completion(report)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func waitForTurns(deadline: Date, completion: @escaping (Int) -> Void) {
+        metrics { [weak self] response in
+            let turns = (response.value?["turns"] as? Int) ?? 0
+            if turns > 0 || Date() >= deadline {
+                completion(turns)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self?.waitForTurns(deadline: deadline, completion: completion)
+            }
+        }
+    }
+
+    /// Reloads with `settings` applied (not persisted) and waits for commit.
+    func reapplyScriptsAndWait(settings: AppSettings, completion: @escaping (Bool) -> Void) {
+        rebuildScripts(settings: settings)
+        waitUntilReady(deadline: Date().addingTimeInterval(60), completion: completion)
+    }
+
+    private func waitUntilReady(deadline: Date, completion: @escaping (Bool) -> Void) {
+        if isPageReady {
+            completion(true)
+            return
+        }
+        guard Date() < deadline else {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.waitUntilReady(deadline: deadline, completion: completion)
+        }
+    }
+
     // MARK: - Error overlay
 
     private func showErrorOverlay(message: String) {
@@ -273,11 +455,26 @@ extension ChatWebController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isPageReady = false
+        navigationStartedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// The document exists from here on, so the injected bridge is live.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        hideErrorOverlay()
+        if let start = navigationStartedAt {
+            lastCommitSeconds = CFAbsoluteTimeGetCurrent() - start
+        }
+        isPageReady = true
+        flushPending()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         hideErrorOverlay()
         isPageReady = true
+        if let start = navigationStartedAt {
+            lastLoadSeconds = CFAbsoluteTimeGetCurrent() - start
+            navigationStartedAt = nil
+        }
         flushPending()
     }
 
@@ -296,11 +493,22 @@ extension ChatWebController: WKNavigationDelegate {
     }
 
     private func handleLoadFailure(_ error: Error) {
+        let nsError = error as NSError
+        // Not real failures: navigations we cancelled for an external link, and
+        // navigations WebKit turned into a download ("frame load interrupted").
+        let isBenign = (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled)
+            || (nsError.domain == "WebKitErrorDomain" && (nsError.code == 102 || nsError.code == 204))
+        if isBenign {
+            // The previous page is still on screen, so keep serving bridge calls.
+            if webView.url != nil {
+                isPageReady = true
+                flushPending()
+            }
+            return
+        }
+
         isPageReady = false
         pending.removeAll()
-        let nsError = error as NSError
-        // Cancelled navigations (our own external-link redirects) are not failures.
-        guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) else { return }
         showErrorOverlay(message: nsError.localizedDescription)
     }
 

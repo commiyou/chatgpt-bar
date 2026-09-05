@@ -6,6 +6,9 @@ public enum SelectorKey: String, CaseIterable, Codable {
     case newChat
     case tempChat
     case assistant
+    /// Conversation turn container. Not clicked - used by the long-conversation
+    /// rendering optimization and by the perf metrics.
+    case turn
 
     public var displayName: String {
         switch self {
@@ -14,6 +17,7 @@ public enum SelectorKey: String, CaseIterable, Codable {
         case .newChat: return "New Chat"
         case .tempChat: return "Temp Chat"
         case .assistant: return "Assistant"
+        case .turn: return "Turn"
         }
     }
 }
@@ -26,33 +30,35 @@ public struct SelectorSet: Equatable {
     public static let builtIn: [SelectorKey: [String]] = [
         .editor: [
             "#prompt-textarea",
-            "div[contenteditable=\"true\"][data-virtualkeyboard]",
             "form div[contenteditable=\"true\"]",
-            "textarea[data-testid=\"prompt-textarea\"]",
             "div[contenteditable=\"true\"]",
             "textarea"
         ],
         .send: [
             "button[data-testid=\"send-button\"]",
-            "button[data-testid=\"composer-send-button\"]",
             "button[aria-label=\"Send prompt\"]",
-            "form button[type=\"submit\"]"
+            "button[data-testid=\"composer-send-button\"]",
+            "form button[type=\"submit\"]:not([data-testid=\"composer-plus-btn\"])"
         ],
         .newChat: [
-            "button[data-testid=\"create-new-chat-button\"]",
-            "a[data-testid=\"create-new-chat-button\"]",
+            "[data-testid=\"create-new-chat-button\"]",
+            "a[aria-label=\"New chat\"]",
             "button[data-testid=\"new-chat-button\"]",
-            "a[href=\"/\"][data-discover]",
             "nav a[href=\"/\"]"
         ],
         .tempChat: [
-            "button[data-testid=\"temporary-chat-button\"]",
             "button[aria-label*=\"Temporary chat\" i]",
-            "[data-testid*=\"temporary-chat\" i]"
+            "button[aria-label*=\"temporary chat\" i]",
+            "[aria-label*=\"\u{4E34}\u{65F6}\"]",
+            "button[data-testid=\"temporary-chat-button\"]",
+            "button[data-testid*=\"temporary-chat\" i]"
         ],
         .assistant: [
-            "div[data-message-author-role=\"assistant\"]",
             "[data-message-author-role=\"assistant\"]"
+        ],
+        .turn: [
+            "[data-testid^=\"conversation-turn\"]",
+            "article[data-testid^=\"conversation-turn\"]"
         ]
     ]
 

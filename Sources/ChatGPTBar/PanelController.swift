@@ -126,8 +126,17 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private func applyPinLevel() {
         panel.isFloatingPanel = pinned
-        panel.level = pinned ? .floating : .normal
+        panel.level = (pinned || temporaryFloating) ? .floating : .normal
         panel.title = pinned ? "\(AppInfo.name) (Pinned)" : AppInfo.name
+    }
+
+    private var temporaryFloating = false
+
+    /// Keeps the panel unoccluded during diagnostics: WebKit throttles
+    /// rendering for covered windows, which would poison the measurement.
+    func setTemporaryFloating(_ value: Bool) {
+        temporaryFloating = value
+        applyPinLevel()
     }
 
     // MARK: - Non-activating

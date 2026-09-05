@@ -3,18 +3,37 @@ import Network
 import WebKit
 import ChatGPTBarKit
 
+/// Reads from this app's defaults domain, falling back to the prototype's
+/// domain so an existing install keeps its settings.
+///
+/// The bundle id had to change: the prototype shipped `com.local.chatgptbar`,
+/// and while two bundles claim the same id, Launch Services routes Services and
+/// the URL scheme to whichever bundle it resolved first.
 final class UserDefaultsStore: KeyValueStore {
-    private let defaults: UserDefaults
+    static let legacySuite = "com.local.chatgptbar"
 
-    init(defaults: UserDefaults = .standard) {
+    private let defaults: UserDefaults
+    private let legacy: UserDefaults?
+
+    init(defaults: UserDefaults = .standard, legacySuite: String? = UserDefaultsStore.legacySuite) {
         self.defaults = defaults
+        self.legacy = legacySuite.flatMap { suite in
+            Bundle.main.bundleIdentifier == suite ? nil : UserDefaults(suiteName: suite)
+        }
     }
 
-    func data(forKey key: String) -> Data? { defaults.data(forKey: key) }
+    func data(forKey key: String) -> Data? {
+        defaults.data(forKey: key) ?? legacy?.data(forKey: key)
+    }
+
     func set(_ data: Data?, forKey key: String) {
         if let data { defaults.set(data, forKey: key) } else { defaults.removeObject(forKey: key) }
     }
-    func object(forKey key: String) -> Any? { defaults.object(forKey: key) }
+
+    func object(forKey key: String) -> Any? {
+        defaults.object(forKey: key) ?? legacy?.object(forKey: key)
+    }
+
     func removeObject(forKey key: String) { defaults.removeObject(forKey: key) }
 }
 
@@ -28,6 +47,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shortcutRouter: ShortcutRouter!
 
     private var settings: AppSettings { store.settings }
+    private let launchOptions = LaunchOptions.parse()
+
+    /// Settings with QA launch overrides applied (not persisted).
+    private var effectiveSettings: AppSettings {
+        var value = store.settings
+        if let force = launchOptions.forceOptimization {
+            value.longConversationOptimization = force
+        }
+        return value
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -35,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMainMenu()
         applyProxy(settings.proxy)
 
-        webController = ChatWebController(settings: settings)
+        webController = ChatWebController(settings: effectiveSettings)
 
         panelController = PanelController(
             content: webController.containerView,
@@ -83,7 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             beginRecording: { [weak self] completion in self?.shortcutRouter.beginRecording(completion: completion) },
             cancelRecording: { [weak self] in self?.shortcutRouter.cancelRecording() },
             probeSelectors: { [weak self] completion in self?.webController.probeSelectors(completion: completion) },
-            dumpDOM: { [weak self] completion in self?.webController.dumpDOMCandidates(completion: completion) }
+            dumpDOM: { [weak self] completion in self?.webController.dumpDOMCandidates(completion: completion) },
+            samplePerformance: { [weak self] seconds, completion in
+                self?.webController.samplePerformance(duration: seconds, completion: completion)
+            }
         ))
 
         registerGlobalHotkeyAndReport()
@@ -92,11 +124,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
 
-        webController.loadHome(settings.resolvedHomeURL)
+        if let url = launchOptions.url {
+            webController.load(url: url)
+        } else {
+            webController.loadHome(settings.resolvedHomeURL)
+        }
         panelController.show()
 
-        if CommandLine.arguments.contains("--settings") {
+        if launchOptions.openSettings {
             openSettings()
+        }
+        if let path = launchOptions.reportPath {
+            runDevReport(path: path)
         }
     }
 
@@ -128,7 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if draft.selectors != previous.selectors {
-            webController.rebuildBridge(selectors: draft.selectors)
+            webController.rebuildScripts(settings: draft)
+        } else if draft.longConversationOptimization != previous.longConversationOptimization {
+            webController.rebuildScripts(settings: draft)
         }
         if draft.homeURL != previous.homeURL {
             webController.loadHome(draft.resolvedHomeURL)
@@ -177,6 +218,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         settingsController.show()
+    }
+
+    private func runDevReport(path: String) {
+        panelController.show()
+        panelController.setTemporaryFloating(true)
+
+        let finish: ([String: Any]) -> Void = { [weak self] payload in
+            guard let self else { return }
+            var output = payload
+            output["appVersion"] = AppInfo.shortVersion
+            output["settleSeconds"] = self.launchOptions.settle
+            FileHandle.standardError.write(Data((DevReportWriter.write(output, to: path) + "\n").utf8))
+            self.panelController.setTemporaryFloating(false)
+            if self.launchOptions.exitAfterReport { NSApp.terminate(nil) }
+        }
+
+        webController.runDiagnostics(url: launchOptions.url, settle: launchOptions.settle) { [weak self] baseline in
+            guard let self else { return }
+            var payload: [String: Any] = [
+                "passA": baseline,
+                "passAOptimization": self.effectiveSettings.longConversationOptimization
+            ]
+
+            let continueWithAB: () -> Void = {
+                guard self.launchOptions.abCompare else {
+                    finish(payload)
+                    return
+                }
+                var flipped = self.effectiveSettings
+                flipped.longConversationOptimization = !flipped.longConversationOptimization
+                self.webController.reapplyScriptsAndWait(settings: flipped) { ready in
+                    guard ready else {
+                        payload["passBError"] = "second pass did not load"
+                        finish(payload)
+                        return
+                    }
+                    self.webController.measurePass(settle: self.launchOptions.settle, includeProbes: false) { second in
+                        payload["passB"] = second
+                        payload["passBOptimization"] = flipped.longConversationOptimization
+                        finish(payload)
+                    }
+                }
+            }
+
+            guard self.launchOptions.probeComposer else {
+                continueWithAB()
+                return
+            }
+            self.webController.probeComposer { composer in
+                payload["composerProbe"] = composer
+                continueWithAB()
+            }
+        }
     }
 
     // MARK: - URL scheme

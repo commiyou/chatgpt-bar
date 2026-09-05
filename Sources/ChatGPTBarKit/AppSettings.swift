@@ -17,7 +17,7 @@ public struct ProxySettings: Codable, Equatable {
 }
 
 public struct AppSettings: Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var homeURL: String
@@ -33,6 +33,10 @@ public struct AppSettings: Codable, Equatable {
 
     public var selectors: SelectorSet
     public var proxy: ProxySettings
+
+    /// Applies `content-visibility` to offscreen conversation turns. Opt-in
+    /// because it trades find-in-page/scroll-anchoring fidelity for speed.
+    public var longConversationOptimization: Bool
 
     /// `chatgptbar://paste?send=1` submits without asking only when this is on.
     /// Off by default: any process or web page can open a URL scheme.
@@ -51,6 +55,7 @@ public struct AppSettings: Codable, Equatable {
         copyLastResponseShortcut: Shortcut? = .defaultCopyLastResponse,
         selectors: SelectorSet = SelectorSet(),
         proxy: ProxySettings = ProxySettings(),
+        longConversationOptimization: Bool = false,
         allowURLSchemeAutoSend: Bool = false
     ) {
         self.schemaVersion = schemaVersion
@@ -65,11 +70,61 @@ public struct AppSettings: Codable, Equatable {
         self.copyLastResponseShortcut = copyLastResponseShortcut
         self.selectors = selectors
         self.proxy = proxy
+        self.longConversationOptimization = longConversationOptimization
         self.allowURLSchemeAutoSend = allowURLSchemeAutoSend
     }
 
     public var resolvedHomeURL: URL {
         URL(string: homeURL) ?? URL(string: "https://chatgpt.com")!
+    }
+}
+
+extension AppSettings {
+    /// `longConversationOptimization` was added in schema 2; older payloads
+    /// simply decode to `false`.
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, homeURL, nonActivating, pinned, panelFrame
+        case toggleShortcut, pinShortcut, newChatShortcut, newTempChatShortcut, copyLastResponseShortcut
+        case selectors, proxy, longConversationOptimization, allowURLSchemeAutoSend
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings()
+        self.init(
+            schemaVersion: try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1,
+            homeURL: try container.decodeIfPresent(String.self, forKey: .homeURL) ?? defaults.homeURL,
+            nonActivating: try container.decodeIfPresent(Bool.self, forKey: .nonActivating) ?? defaults.nonActivating,
+            pinned: try container.decodeIfPresent(Bool.self, forKey: .pinned) ?? defaults.pinned,
+            panelFrame: try container.decodeIfPresent(String.self, forKey: .panelFrame),
+            toggleShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .toggleShortcut),
+            pinShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .pinShortcut),
+            newChatShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .newChatShortcut),
+            newTempChatShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .newTempChatShortcut),
+            copyLastResponseShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .copyLastResponseShortcut),
+            selectors: try container.decodeIfPresent(SelectorSet.self, forKey: .selectors) ?? SelectorSet(),
+            proxy: try container.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings(),
+            longConversationOptimization: try container.decodeIfPresent(Bool.self, forKey: .longConversationOptimization) ?? false,
+            allowURLSchemeAutoSend: try container.decodeIfPresent(Bool.self, forKey: .allowURLSchemeAutoSend) ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(homeURL, forKey: .homeURL)
+        try container.encode(nonActivating, forKey: .nonActivating)
+        try container.encode(pinned, forKey: .pinned)
+        try container.encodeIfPresent(panelFrame, forKey: .panelFrame)
+        try container.encodeIfPresent(toggleShortcut, forKey: .toggleShortcut)
+        try container.encodeIfPresent(pinShortcut, forKey: .pinShortcut)
+        try container.encodeIfPresent(newChatShortcut, forKey: .newChatShortcut)
+        try container.encodeIfPresent(newTempChatShortcut, forKey: .newTempChatShortcut)
+        try container.encodeIfPresent(copyLastResponseShortcut, forKey: .copyLastResponseShortcut)
+        try container.encode(selectors, forKey: .selectors)
+        try container.encode(proxy, forKey: .proxy)
+        try container.encode(longConversationOptimization, forKey: .longConversationOptimization)
+        try container.encode(allowURLSchemeAutoSend, forKey: .allowURLSchemeAutoSend)
     }
 }
 
@@ -124,6 +179,11 @@ public final class SettingsStore {
 
     private static func migrate(_ settings: AppSettings) -> AppSettings {
         var updated = settings
+        if updated.schemaVersion < 2 {
+            // Schema 1 (and the prototype) persisted the shipped default
+            // selectors verbatim, which pinned users to stale values forever.
+            updated.selectors = LegacySelectors.dropStaleOverrides(in: updated.selectors)
+        }
         if updated.schemaVersion < AppSettings.currentSchemaVersion {
             updated.schemaVersion = AppSettings.currentSchemaVersion
         }
@@ -149,6 +209,56 @@ public final class SettingsStore {
     private func persist() {
         guard let data = try? encoder.encode(settings) else { return }
         store.set(data, forKey: SettingsStore.settingsKey)
+    }
+}
+
+/// Selector lists that were shipped as defaults by earlier versions. Overrides
+/// made up entirely of these are stale defaults, not user edits.
+public enum LegacySelectors {
+    public static let prototype: [SelectorKey: [String]] = [
+        .editor: [
+            "textarea[aria-label=\"Chat with ChatGPT\"]",
+            "div[contenteditable=\"true\"]",
+            "textarea"
+        ],
+        .send: [
+            "button[data-testid=\"send-button\"]",
+            "button[aria-label=\"Send prompt\"]",
+            "button[data-testid=\"composer-send-button\"]",
+            "button[aria-label*=\"Send\"]"
+        ],
+        .newChat: [
+            "button[data-testid=\"new-chat-button\"]",
+            "a[href=\"/\"]",
+            "button[aria-label=\"New chat\"]",
+            "[data-testid=\"new-chat\"]",
+            "a[aria-label=\"New chat\"]"
+        ],
+        .tempChat: [
+            "button[data-testid=\"temporary-chat-button\"]",
+            "button[aria-label=\"Temporary chat\"]",
+            "button[aria-label*=\"Temporary chat\"]",
+            "[aria-label*=\"Temporary chat\"]",
+            "[aria-label*=\"\u{4E34}\u{65F6}\"]"
+        ],
+        .assistant: [
+            "div[data-message-author-role=\"assistant\"]"
+        ]
+    ]
+
+    /// True when every selector was shipped by a previous version, i.e. the
+    /// user never hand-wrote anything here.
+    public static func isShippedDefault(_ key: SelectorKey, _ selectors: [String]) -> Bool {
+        let known = Set((prototype[key] ?? []) + (SelectorSet.builtIn[key] ?? []))
+        return !selectors.isEmpty && selectors.allSatisfy { known.contains($0) }
+    }
+
+    public static func dropStaleOverrides(in set: SelectorSet) -> SelectorSet {
+        var overrides = set.overrides
+        for (key, value) in overrides where isShippedDefault(key, value) {
+            overrides[key] = nil
+        }
+        return SelectorSet(overrides: overrides)
     }
 }
 
@@ -186,10 +296,11 @@ public enum LegacySettingsMigration {
         var overrides: [SelectorKey: [String]] = [:]
         for key in SelectorKey.allCases {
             guard let stored = store.object(forKey: "selector.\(key.rawValue)") as? [String], !stored.isEmpty else { continue }
-            // The prototype stored built-in defaults verbatim; keep only real edits.
-            if stored == SelectorSet.builtIn[key] { continue }
-            overrides[key] = stored
             found = true
+            // The prototype stored its built-in defaults verbatim; keep only
+            // selectors the user actually wrote.
+            if LegacySelectors.isShippedDefault(key, stored) { continue }
+            overrides[key] = stored
         }
         if !overrides.isEmpty {
             settings.selectors = SelectorSet(overrides: overrides)

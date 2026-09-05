@@ -73,6 +73,34 @@ do {
 // MARK: - Selectors
 
 do {
+    // A schema-1 payload that pinned the prototype's default selectors plus one
+    // hand-written selector.
+    let json = """
+    {
+      "schemaVersion": 1,
+      "homeURL": "https://chatgpt.com",
+      "nonActivating": true,
+      "pinned": false,
+      "selectors": { "overrides": {
+        "editor": ["textarea[aria-label=\\"Chat with ChatGPT\\"]", "div[contenteditable=\\"true\\"]", "textarea"],
+        "send": ["button.my-own-send"]
+      } },
+      "proxy": { "enabled": false, "host": "", "port": 0 },
+      "allowURLSchemeAutoSend": false
+    }
+    """
+    let store = InMemoryStore()
+    store.set(Data(json.utf8), forKey: SettingsStore.settingsKey)
+    let migrated = SettingsStore(store: store).settings
+
+    checkEqual(migrated.schemaVersion, AppSettings.currentSchemaVersion, "schema bumped to current")
+    check(!migrated.selectors.isOverridden(.editor), "stale shipped defaults dropped on migration")
+    checkEqual(migrated.selectors.selectors(for: .editor), SelectorSet.builtIn[.editor]!, "editor falls back to new built-ins")
+    checkEqual(migrated.selectors.selectors(for: .send), ["button.my-own-send"], "hand-written selector preserved")
+    checkEqual(migrated.longConversationOptimization, false, "new flag defaults to false on old payloads")
+}
+
+do {
     var set = SelectorSet()
     checkEqual(set.selectors(for: .editor), SelectorSet.builtIn[.editor]!, "built-in selectors used by default")
 
@@ -94,6 +122,18 @@ do {
 }
 
 // MARK: - Bridge script
+
+do {
+    let set = SelectorSet()
+    let css = RenderTweaks.css(selectors: set)
+    checkEqual(
+        css.split(separator: "\n").count,
+        SelectorSet.builtIn[.turn]!.count,
+        "one CSS rule per turn selector"
+    )
+    check(css.contains("content-visibility: auto"), "content-visibility applied")
+    check(RenderTweaks.source(selectors: set).contains(RenderTweaks.styleElementID), "style element is identifiable")
+}
 
 do {
     var set = SelectorSet()
@@ -190,6 +230,10 @@ do {
     checkEqual(decide("itms-apps://apps.apple.com"), .block, "unknown scheme blocked")
     check(policy.isAllowedHost("cdn.oaistatic.com"), "subdomain suffix match")
     check(!policy.isAllowedHost("chatgpt.com.evil.example"), "suffix match is not substring match")
+
+    // A custom home page must not be bounced to the browser.
+    let custom = NavigationPolicy(allowedHostSuffixes: NavigationPolicy.defaultAllowedHostSuffixes + ["127.0.0.1"])
+    checkEqual(custom.decide(url: URL(string: "http://127.0.0.1:8123/test.html"), isMainFrame: true), .allowInPanel, "custom home host stays in panel")
 }
 
 // MARK: - Result

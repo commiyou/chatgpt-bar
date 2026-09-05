@@ -115,6 +115,48 @@ public enum BridgeScript {
             el.dispatchEvent(new KeyboardEvent('keyup', init));
           }
 
+          // Frame-time sampler. WebKit has no Long Tasks API, so jank is
+          // measured as requestAnimationFrame gaps. Only runs while sampling.
+          var perf = null;
+          function perfReset() {
+            perf = { on: false, frames: 0, longFrames: 0, maxFrame: 0, blocking: 0, last: 0, startedAt: 0 };
+          }
+          perfReset();
+          function perfTick(ts) {
+            if (!perf.on) { return; }
+            if (perf.last) {
+              var delta = ts - perf.last;
+              perf.frames++;
+              if (delta > 50) { perf.longFrames++; perf.blocking += delta - 50; }
+              if (delta > perf.maxFrame) { perf.maxFrame = delta; }
+            }
+            perf.last = ts;
+            requestAnimationFrame(perfTick);
+          }
+
+          // The conversation scroller is an inner element, not the document, and
+          // its ancestors are not reliably marked, so pick the tallest element
+          // that actually scrolls.
+          function findScroller() {
+            var best = null;
+            var fallback = null;
+            var nodes = document.querySelectorAll('div, main, section, article');
+            for (var i = 0; i < nodes.length; i++) {
+              var el = nodes[i];
+              if (el.scrollHeight <= el.clientHeight + 40) { continue; }
+              if (!fallback || (el.scrollHeight - el.clientHeight) > (fallback.scrollHeight - fallback.clientHeight)) {
+                fallback = el;
+              }
+              var overflow = getComputedStyle(el).overflowY;
+              if (overflow !== 'auto' && overflow !== 'scroll' && overflow !== 'overlay') { continue; }
+              if (!best || el.clientHeight > best.clientHeight) { best = el; }
+            }
+            if (best) { return best; }
+            if (fallback) { return fallback; }
+            var root = document.scrollingElement || document.body;
+            return root;
+          }
+
           window.\(globalName) = {
             version: \(version),
             selectors: SELECTORS,
@@ -160,6 +202,13 @@ public enum BridgeScript {
               return ok({ text: isField(hit.el) ? hit.el.value : textOf(hit.el) });
             },
 
+            clear() {
+              var hit = firstMatch('editor');
+              if (!hit) { return fail('editor_not_found'); }
+              clearEditor(hit.el);
+              return ok({ cleared: true });
+            },
+
             lastResponse() {
               var hit = allMatches('assistant');
               if (!hit) { return fail('assistant_not_found'); }
@@ -201,6 +250,70 @@ public enum BridgeScript {
                 });
               });
               return ok({ url: location.href, results: results });
+            },
+
+            perfStart() {
+              perfReset();
+              perf.on = true;
+              perf.startedAt = performance.now();
+              requestAnimationFrame(perfTick);
+              return ok({ started: true });
+            },
+
+            perfStop() {
+              if (!perf.on) { return fail('perf_not_running'); }
+              perf.on = false;
+              return ok({
+                durationMs: Math.round(performance.now() - perf.startedAt),
+                frames: perf.frames,
+                longFrames: perf.longFrames,
+                maxFrameMs: Math.round(perf.maxFrame),
+                blockingMs: Math.round(perf.blocking)
+              });
+            },
+
+            /// Deterministic scroll sweep so jank numbers are comparable.
+            async scrollBench(durationMs) {
+              var scroller = findScroller();
+              if (!scroller) { return fail('scroller_not_found'); }
+              var started = performance.now();
+              var direction = 1;
+              var steps = 0;
+              while (performance.now() - started < (durationMs || 4000)) {
+                scroller.scrollTop += direction * 500;
+                steps++;
+                if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) { direction = -1; }
+                if (scroller.scrollTop <= 0) { direction = 1; }
+                await sleep(32);
+              }
+              return ok({
+                steps: steps,
+                scrollHeight: scroller.scrollHeight,
+                clientHeight: scroller.clientHeight,
+                tag: scroller.tagName.toLowerCase(),
+                scrollable: scroller.scrollHeight > scroller.clientHeight + 40
+              });
+            },
+
+            metrics() {
+              var turns = allMatches('turn');
+              var assistants = allMatches('assistant');
+              var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || null;
+              var firstTurn = (turns && turns.nodes.length) ? turns.nodes[0] : null;
+              return ok({
+                url: location.href,
+                domNodes: document.getElementsByTagName('*').length,
+                turns: turns ? turns.nodes.length : 0,
+                turnSelector: turns ? turns.selector : null,
+                assistantNodes: assistants ? assistants.nodes.length : 0,
+                codeBlocks: document.querySelectorAll('pre').length,
+                images: document.querySelectorAll('img').length,
+                scrollHeight: document.documentElement.scrollHeight,
+                turnContentVisibility: firstTurn ? getComputedStyle(firstTurn).contentVisibility : null,
+                domContentLoadedMs: nav ? Math.round(nav.domContentLoadedEventEnd) : null,
+                loadEventMs: nav ? Math.round(nav.loadEventEnd) : null,
+                transferSizeKB: nav && nav.transferSize ? Math.round(nav.transferSize / 1024) : null
+              });
             },
 
             dump() {
@@ -255,6 +368,35 @@ public enum BridgeScript {
             }
         }
         return out + "\""
+    }
+}
+
+/// Opt-in rendering tweaks for long conversations.
+///
+/// ChatGPT keeps the whole thread in the DOM, so a long conversation pays
+/// layout and paint for every offscreen turn. `content-visibility: auto` lets
+/// WebKit skip that work until a turn is near the viewport.
+public enum RenderTweaks {
+    public static let styleElementID = "chatgpt-bar-render-tweaks"
+
+    public static func css(selectors: SelectorSet) -> String {
+        // One rule per selector: an unsupported selector is dropped on its own
+        // instead of invalidating the whole rule.
+        selectors.selectors(for: .turn).map { selector in
+            "\(selector) { content-visibility: auto; contain-intrinsic-size: auto 480px; }"
+        }.joined(separator: "\n")
+    }
+
+    public static func source(selectors: SelectorSet) -> String {
+        """
+        (function () {
+          if (document.getElementById(\(BridgeScript.jsonString(styleElementID)))) { return; }
+          var style = document.createElement('style');
+          style.id = \(BridgeScript.jsonString(styleElementID));
+          style.textContent = \(BridgeScript.jsonString(css(selectors: selectors)));
+          (document.head || document.documentElement).appendChild(style);
+        })();
+        """
     }
 }
 

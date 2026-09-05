@@ -12,6 +12,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         var cancelRecording: () -> Void
         var probeSelectors: (@escaping (String) -> Void) -> Void
         var dumpDOM: (@escaping (String) -> Void) -> Void
+        var samplePerformance: (TimeInterval, @escaping ([String: Any]) -> Void) -> Void
     }
 
     private enum ShortcutSlot: CaseIterable {
@@ -41,6 +42,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var selectorEditors: [SelectorKey: NSTextView] = [:]
     private var nonActivatingCheckbox: NSButton!
     private var autoSendCheckbox: NSButton!
+    private var longConversationCheckbox: NSButton!
     private var homeURLField: NSTextField!
     private var proxyEnabledCheckbox: NSButton!
     private var proxyHostField: NSTextField!
@@ -99,6 +101,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         autoSendCheckbox = NSButton(checkboxWithTitle: "允许 chatgptbar:// 免确认直接发送（有风险）", target: nil, action: nil)
         stack.addView(autoSendCheckbox, in: .top)
         stack.addView(hint("关闭时，来自 URL Scheme 的 send=1 会先弹出确认框，避免任意网页静默用你的账号发消息。"), in: .top)
+
+        longConversationCheckbox = NSButton(checkboxWithTitle: "长会话渲染优化（content-visibility，实验性）", target: nil, action: nil)
+        stack.addView(longConversationCheckbox, in: .top)
+        stack.addView(hint("对视口外的会话轮次跳过布局与绘制。实测（49000px、358 个代码块的会话，双向 A/B）没有稳定收益，因此默认关闭；卡顿主要来自页面自身渲染。保存后会重新加载页面。"), in: .top)
+
+        let perfButton = NSButton(title: "性能诊断（采样 6 秒）", target: self, action: #selector(runPerfDiagnostics))
+        stack.addView(perfButton, in: .top)
 
         homeURLField = NSTextField(string: draft.homeURL)
         homeURLField.placeholderString = "https://chatgpt.com"
@@ -262,6 +271,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         nonActivatingCheckbox.state = draft.nonActivating ? .on : .off
         autoSendCheckbox.state = draft.allowURLSchemeAutoSend ? .on : .off
+        longConversationCheckbox.state = draft.longConversationOptimization ? .on : .off
         homeURLField.stringValue = draft.homeURL
         proxyEnabledCheckbox.state = draft.proxy.enabled ? .on : .off
         proxyHostField.stringValue = draft.proxy.host
@@ -276,6 +286,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private func collectControlsIntoDraft() {
         draft.nonActivating = nonActivatingCheckbox.state == .on
         draft.allowURLSchemeAutoSend = autoSendCheckbox.state == .on
+        draft.longConversationOptimization = longConversationCheckbox.state == .on
 
         let url = homeURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         draft.homeURL = url.isEmpty ? "https://chatgpt.com" : url
@@ -359,6 +370,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             Feedback.shared.showText(title: "DOM 候选（data-testid / aria-label / role）", body: text, extraButton: ("复制到剪贴板", {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
+            }))
+        }
+    }
+
+    @objc private func runPerfDiagnostics() {
+        Feedback.shared.toast("正在采样 6 秒，请滚动当前会话")
+        environment.samplePerformance(6) { report in
+            let body = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "\(report)"
+            Feedback.shared.showText(title: "性能诊断", body: body, extraButton: ("复制到剪贴板", {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(body, forType: .string)
             }))
         }
     }
