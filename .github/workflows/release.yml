@@ -22,7 +22,7 @@ jobs:
       should_release: ${{ steps.version.outputs.should_release }}
       create_tag: ${{ steps.version.outputs.create_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve release version
         id: version
@@ -65,7 +65,7 @@ jobs:
       CREATE_TAG: ${{ needs.prepare.outputs.create_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run self-tests
         run: swift run SelfTest
