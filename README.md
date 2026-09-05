@@ -1,172 +1,200 @@
 # ChatGPT Bar
 
-macOS 菜单栏 ChatGPT 网页壳：`WKWebView` 加载 `https://chatgpt.com`，提供全局快捷键、菜单栏菜单、窗口置顶、URL Scheme / Services 文本投递，以及可配置的页面选择器与 JS 桥。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-这是按原型需求重写的初版（0.1.0），重点是修掉原型里“看起来能用其实不能用”的部分：Services 未注册、全局热键处理器叠加、页面桥失败静默、没有导航/UI 代理、代理设置无效。
+A native-feeling macOS menu bar shell for ChatGPT, built with Swift/AppKit and `WKWebView`.
 
-## 功能需求覆盖
+ChatGPT Bar keeps ChatGPT available as a persistent, pinnable macOS panel with global shortcuts, URL Scheme automation, macOS Services, configurable page selectors, diagnostics, and local-only settings.
 
-- 菜单栏常驻：左键开关面板，右键弹出菜单（`popUp(positioning:at:in:)`，不再临时挂 `statusItem.menu`）。
-- 面板可选不抢焦点（non-activating panel），点击面板内部时主动 `makeKey()`。
-- `Pin` 置顶（`.floating`）与取消置顶，状态持久化。
-- 全局快捷键开关面板；`Pin` / `New Chat` / `New Temp Chat` / `Copy Last Response` 为面板内局部快捷键。
-- URL Scheme 接收外部文本，支持 `append` / `replace` / `send` / `open`。
-- macOS Services“Send to ChatGPT Bar”。
-- 选择器可配置，附带 `检测选择器` 与 `导出 DOM 候选` 自检，以及 `恢复内置默认`。
-- 注入 `WKUserScript` 页面桥，所有入口返回 `{ ok, value | error }`。
-- 代理配置（仅 macOS 14+，见下）。
+![ChatGPT Bar panel](docs/images/panel.png)
 
-## 目录结构
+![ChatGPT Bar settings](docs/images/settings.png)
 
-```text
-chatgpt-bar/
-├── Package.swift
-├── Sources/
-│   ├── ChatGPTBarKit/          # 纯逻辑，无 AppKit/WebKit，被 SelfTest 覆盖
-│   │   ├── AppSettings.swift   # Codable 设置 + 存储 + 旧版本迁移
-│   │   ├── Shortcut.swift      # 键位/修饰键与显示
-│   │   ├── SelectorSet.swift   # 内置选择器 + 用户覆盖
-│   │   ├── URLCommand.swift    # chatgptbar:// 解析
-│   │   ├── NavigationPolicy.swift
-│   │   └── BridgeScript.swift  # 页面桥 JS 生成 + 响应解析
-│   ├── ChatGPTBar/             # AppKit + WebKit 装配
-│   │   ├── main.swift
-│   │   ├── AppDelegate.swift
-│   │   ├── PanelController.swift
-│   │   ├── ChatWebController.swift
-│   │   ├── PopupWindowController.swift
-│   │   ├── StatusItemController.swift
-│   │   ├── SettingsWindowController.swift  # NSWindow + NSHostingView 宿主
-│   │   ├── SettingsView.swift  # SwiftUI 设置界面与草稿状态
-│   │   ├── HotKeyCenter.swift
-│   │   ├── ShortcutRouter.swift
-│   │   ├── LaunchOptions.swift # 诊断开关与报告落盘
-│   │   └── Feedback.swift
-│   └── SelfTest/               # 纯逻辑检查（CLT 无 XCTest）
-├── Support/Info.plist
-└── scripts/build.sh
-```
+## Features
 
-## 构建与运行
+- **Menu bar app**: left-click to show/hide the panel; right-click for the menu.
+- **Global shortcut**: `⌥⌘Space` by default for show/hide.
+- **Panel shortcuts**: `⌘P` Pin, `⌘N` New Chat, `⌘⇧N` New Temp Chat, and `⌘⇧C` Copy Last Response by default.
+- **Pin support**: uses macOS `.floating` window level and persists the state.
+- **Configurable response copy**: use `getLastResponse` Markdown by default, or trigger ChatGPT's native Copy button and observe the system pasteboard.
+- **URL Scheme**: supports `open`, `newChat`, `newTempChat`, `copyLastResponse`, and `paste`; commands can be enabled individually.
+- **macOS Services**: send selected text to ChatGPT.
+- **Paste modes**: `append`, `replace`, and `send`, with confirmation before automatic submission.
+- **Page adaptation**: configurable selectors, selector probing, DOM candidate export, and built-in selector reset.
+- **Visible failures**: selector misses, shortcut conflicts, bridge failures, and disabled URL commands are reported.
+- **Proxy**: uses `WKWebsiteDataStore.proxyConfigurations` on macOS 14+.
+- **Local-first**: no telemetry; login state and settings remain on your Mac.
+
+## Requirements
+
+- macOS 13 Ventura or later
+- Apple Silicon or Intel Mac
+
+## Install
+
+Download the matching archive from [Releases](../../releases/latest):
+
+| Mac | Artifact |
+| --- | --- |
+| Apple Silicon | `ChatGPTBar-macos-arm64-v<version>.zip` |
+| Intel | `ChatGPTBar-macos-x86_64-v<version>.zip` |
+
+Each release also includes source archives and a `SHA256SUMS.txt` file.
+
+The app is ad-hoc signed and is not notarized. If macOS blocks the first launch, run:
 
 ```sh
-sh scripts/build.sh          # 产出 dist/ChatGPT Bar.app（ad-hoc 签名）
-open "dist/ChatGPT Bar.app"
-swift run SelfTest           # 62 项纯逻辑检查
+xattr -dr com.apple.quarantine "ChatGPT Bar.app"
 ```
 
-`swift build` 的最低系统版本由 `Package.swift` 的 `platforms: [.macOS(.v13)]` 决定，与 `Info.plist` 的 `LSMinimumSystemVersion` 一致。
+Build from source:
 
-### 诊断开关
+```sh
+sh scripts/build.sh
+open "dist/ChatGPT Bar.app"
+```
 
-这些开关只用于开发与排查，直接跑 bundle 里的可执行文件（`open --args` 在已有实例运行时不会把参数传进去）：
+## Shortcuts
+
+| Action | Default | Scope |
+| --- | ---: | --- |
+| Show / hide panel | `⌥⌘Space` | Global |
+| Pin / Unpin | `⌘P` | Panel focused |
+| New Chat | `⌘N` | Panel focused |
+| New Temp Chat | `⌘⇧N` | Panel focused |
+| Copy Last Response | `⌘⇧C` | Panel focused |
+
+Shortcuts can be changed in **Settings → Shortcuts**. Panel-local shortcuts only fire while the chat panel is the key window, so they do not intercept typing in the Settings window or on the page.
+
+## Copy behavior
+
+`Copy Last Response` has two explicit strategies in **Settings → General →
+Copy**:
+
+- **Markdown (`getLastResponse`)** reads the latest assistant container through
+  the page bridge, rebuilds Markdown from the rendered DOM, and writes it to the
+  native macOS pasteboard.
+- **ChatGPT native Copy** triggers the latest response's own Copy button and
+  waits for the native pasteboard to change. It does not wrap or intercept
+  `navigator.clipboard`, so the page keeps its original behavior.
+
+The `getLastResponse` bridge operation always returns a `markdown` field. The
+native Copy strategy is intentionally separate because ChatGPT's own action may
+produce plain text rather than Markdown, and synthetic clicks do not always have
+the same user-activation privileges as a real click.
+
+## URL Scheme
+
+Commands are sent through `chatgptbar://` and can be enabled or disabled in **Settings → URL Scheme**.
+
+| Command | Example |
+| --- | --- |
+| `open` | `chatgptbar://open` |
+| `newChat` | `chatgptbar://newChat` |
+| `newTempChat` | `chatgptbar://newTempChat` |
+| `copyLastResponse` | `chatgptbar://copyLastResponse` |
+| `paste` | `chatgptbar://paste?text=hello&mode=append&send=0` |
+
+`paste` accepts:
+
+- `mode=append|replace`
+- `send=0|1`
+- `reveal=0|1`
+
+`send=1` shows a confirmation by default because any local process can open a URL Scheme. Automatic confirmation can be enabled explicitly in Settings.
+
+## Pin semantics
+
+Pin uses macOS `.floating` window level: above normal windows and generally visible across Spaces. It is not an absolute system overlay level; system security prompts, menus, and some exclusive full-screen windows can still appear above it.
+
+The app re-applies ordering when the panel is shown, pinned, focused, or unfocused because AppKit may reorder non-activating panels.
+
+## Diagnostics
+
+Run the executable inside the app bundle for development flags:
 
 ```sh
 BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
-"$BIN" --settings [general|shortcuts|page]          # 启动即打开设置窗口（可指定标签页）
-"$BIN" --url "https://chatgpt.com/c/<id>"           # 指定初始页面
-"$BIN" --dev-report /tmp/r.json --settle 10 --ab \
-       --exit-after-report                          # 采样一次并写 JSON 报告
-"$BIN" --dev-report /tmp/r.json --probe-composer    # 先输入探针文本再 dump（send 按钮只在有输入时存在）
-"$BIN" --force-optimization 0|1                     # 覆盖长会话优化开关（不落盘）
+
+"$BIN" --settings [general|shortcuts|urlScheme|page]
+"$BIN" --url "https://chatgpt.com/c/<id>"
+"$BIN" --dev-report /tmp/report.json --settle 10 --ab --exit-after-report
+"$BIN" --dev-report /tmp/report.json --probe-composer
+"$BIN" --force-optimization 0|1
 ```
 
-报告里 `documentCommitSeconds` / `uiLoadSeconds` / `timeToFirstTurnSeconds` 分别是文档提交、load 事件、会话内容真正出现的耗时；`jank` 是一次确定性滚动扫描期间的 rAF 帧间隔统计（WebKit 没有 Long Tasks API）。
+Reports include document commit time, UI load time, first turn visibility, scroll jank, and selector results.
 
-## 架构要点
+## Development
 
-### 设置：单一来源
+```sh
+swift build
+swift run SelfTest
+sh scripts/build.sh
 
-`AppSettings` 是一个 `Codable` 结构，整体以 JSON 写入 `UserDefaults`（键 `settings.json`），带 `schemaVersion`。设置窗口编辑的是草稿副本，只有点“保存并应用”才提交，`AppDelegate.apply(_:)` 对比新旧值决定要不要重建页面桥、重载页面、重建面板、重注册热键。
+# Build a specific architecture
+ARCHS=x86_64 sh scripts/build.sh
 
-界面用 SwiftUI 的 `Form` + `.formStyle(.grouped)` 实现，分为通用 / 快捷键 / 页面适配三个标签页，由 `NSHostingView` 挂在普通 `NSWindow` 上：分组卡片、右对齐控件、每组下方脚注、底部操作栏，和系统设置的观感一致。检测结果与性能报告走 SwiftUI sheet（可选中文本 + 复制按钮），不再塞进 `NSAlert` 的 accessory view。
-`AppDelegate` 只依赖 `SettingsWindowController.Environment` 这一组闭包，界面层可以整体替换而不动业务代码。
+# Build both architectures where supported
+ARCHS="arm64 x86_64" sh scripts/build.sh
+```
 
-快捷键用 `Shortcut?` 表示，`nil` 才是“未设置”。原型把 `0` 当未设置，因此 `A` 键（keyCode 0）和无修饰键组合永远存不下来。
+`SelfTest` is a SwiftPM executable so pure logic can be tested even on machines with only Command Line Tools. Window ordering, multi-display, full-screen, and live ChatGPT behavior still require manual testing.
 
-选择器只持久化“用户覆盖”，编辑回内置值等于清除覆盖，因此以后升级内置选择器不会被旧存档永久遮挡。首次启动会迁移原型写下的扁平键（`hotkeyKeyCode`、`selector.*`、`panelFrame`、`nonActivating`），代理设置故意不迁移。
+### Project layout
 
-### 页面桥：可观测的失败
+```text
+.
+├── Package.swift
+├── Sources/
+│   ├── ChatGPTBarKit/          # Pure logic: settings, shortcuts, selectors, bridge
+│   ├── ChatGPTBar/             # AppKit + WebKit integration and UI
+│   └── SelfTest/               # Pure-logic checks
+├── Support/Info.plist
+├── Resources/
+├── scripts/build.sh
+└── docs/images/
+```
 
-`BridgeScript` 生成的 `window.__chatgptBar` 每个入口都返回 `{ ok, value | error }`；Swift 侧用 `callAsyncJavaScript` 传参（不做字符串拼接），失败统一走 HUD 提示，例如 `复制失败：找不到回复内容（assistant 选择器失配）`。
+## Releases
 
-就绪判定靠轮询选择器直到超时（默认 8s），不再用 `0.4s` / `250ms` 硬编码延迟；页面还没首次加载完的调用会进等待队列，`didFinish` 后统一冲刷。
+1. Update `CFBundleShortVersionString` in `Support/Info.plist`.
+2. Update `CHANGELOG.md`.
+3. Merge to `main`.
 
-`Copy Last Response` 改为原生实现：取 `assistant` 节点文本写入 `NSPasteboard`，不再点击页面上英文 `aria-label="Copy message"` 的按钮。
+The Release workflow detects an unpublished version, creates the tag, runs self-tests, builds separate `arm64` and `x86_64` apps, creates source archives, and uploads all artifacts.
 
-### WebView：补齐网页壳该有的代理
+Manual triggers can specify a version, with or without the `v` prefix.
 
-- `WKNavigationDelegate`：白名单内（chatgpt.com / openai.com / 各登录方）留在面板，其他主框架跳转交给默认浏览器；子资源与 iframe 永不拦截；未知 scheme 拒绝。
-- `WKUIDelegate`：`createWebViewWith` 用弹窗窗口承载 `target=_blank` 与 OAuth 登录；`runOpenPanel` 支持附件上传；JS `alert/confirm/prompt` 走 `NSAlert`；麦克风权限只对白名单域名放行。
-- 下载：`canShowMIMEType == false` 转 `.download`，`WKDownloadDelegate` 落盘到 `~/Downloads` 并自动去重命名。
-- 加载失败显示原生错误层与“重新加载”，Web Content Process 崩溃自动恢复。
-- UA 不再硬编码 Safari 版本，改为在系统 UA 后追加 `ChatGPTBar/<version>`。
+## Signing and notarization
 
-### 热键与局部快捷键
+Current release artifacts are ad-hoc signed. They are safe to build locally but macOS may quarantine downloads. Public distribution is smoother with:
 
-`HotKeyCenter` 只安装一次 Carbon event handler，重注册前先 `UnregisterEventHotKey`，并把 `OSStatus` 转成可见错误（例如“该快捷键已被其他应用占用”）。原型每次改快捷键都会叠加一个 handler，导致按一次触发 N 次。
+1. Apple Developer Program membership.
+2. A `Developer ID Application` certificate.
+3. Hardened Runtime enabled at signing time.
+4. Notarization with `notarytool`, followed by `stapler staple`.
 
-`ShortcutRouter` 只有一个 local monitor，且局部快捷键只在聊天面板是 key window 时命中，不会再吞掉设置窗口输入框里的按键或网页自身快捷键；录制状态下 `Esc` 取消，不会一直吃按键。
+CI needs repository secrets for the certificate, certificate password, Apple ID or App Store Connect API key, and Apple Team ID. Signing credentials are intentionally not stored in this repository.
 
-### 安全
+## Privacy and security
 
-`chatgptbar://paste?...&send=1` 默认会先弹确认框（预览前 300 字），因为任何进程或网页都能打开 URL Scheme；要免确认需在设置里显式打开。`send=1` 时强制显示面板。`dump` 不再作为 URL 命令暴露（它会写剪贴板），只保留在设置界面。文本长度上限 100k。
+- No telemetry.
+- No content proxying unless a proxy is configured.
+- ChatGPT cookies and site data remain in the app's local website data store.
+- URL commands are individually disableable, and auto-send is opt-in.
 
-## 代理
+## Known limitations
 
-`WKWebView` 不读 `HTTP_PROXY` 环境变量（网络在独立 Network Process，CFNetwork 也不认这套约定），原型的实现是无效代码。这里改用 `WKWebsiteDataStore.proxyConfigurations`（`ProxyConfiguration(httpCONNECTProxy:)`），仅 macOS 14+ 生效；低于 14 时设置项禁用并提示改用系统代理。
+- Page selectors depend on ChatGPT's DOM and may need recalibration after site changes.
+- The DOM fallback cannot perfectly reconstruct every custom card, table, or complex component.
+- Releases are ad-hoc signed and not notarized.
+- OAuth popups, microphone permission, and the macOS 14+ proxy path need broader manual testing.
 
-## 选择器校准（2026-09-05 实测）
+## Contributing
 
-内置选择器不是猜的，是用 `--dev-report --probe-composer` 在登录态的真实页面上逐条探测后写死的：
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. For security issues, see [SECURITY.md](SECURITY.md).
 
-- `editor`：`#prompt-textarea` 命中。
-- `send`：`button[data-testid="send-button"]` 命中，但**只有输入框非空时该按钮才存在**，空输入框时页面只有 `composer-plus-btn` / `Start dictation`。
-- `newChat`：`[data-testid="create-new-chat-button"]`（标签是 `a`，不是 `button`）命中。
-- `assistant`：`[data-message-author-role="assistant"]` 命中。
-- `turn`：`[data-testid^="conversation-turn"]` 命中，元素是 `section`，不是 `article`。
-- `tempChat`：`button[aria-label*="Temporary chat" i]` 只在新会话页存在，会话页里没有；回退到 `/?temporary-chat=true` 已实测有效（页面出现 `data-testid=temporary-chat-label`、按钮变为 `Turn off temporary chat`）。
+## License
 
-schema 2 迁移会把原型写下的那批过期选择器当作“出厂默认”丢弃，只保留用户真正手写过的条目。
-
-## 长会话卡顿：实测结论
-
-在一条真实的重会话上测（滚动容器高 49160px、358 个 `<pre>` 代码块、约 6900 个 DOM 节点，只渲染 2 个轮次，说明站点自身做了轮次虚拟化）：
-
-- 网络不是瓶颈：`documentCommit` 0.3-0.7s，load 事件 0.7-1.3s，主文档 105KB。
-- 瓶颈在页面自身渲染：从导航开始到会话内容出现稳定需要 **5-7s**，四次采样都一样。
-- 滚动期间 10s 窗口内有 6.8-8.3s 处于长帧，最长单帧约 **4s**。
-- `content-visibility` 优化做了顺序对调的双向 A/B：关闭 7619ms / 8312ms 阻塞，开启 7817ms / 6809ms，最长帧两者都在 4s 附近 —— **没有稳定收益，假设被否掉**，因此该开关默认关闭并标注为实验性。
-- 一次冷启动里 load 事件 60s 都没到达。因此就绪判定从 `didFinish` 改成 `didCommit`：重会话下 URL Scheme / Services 的插入不再被整页加载卡住。
-- 环境因素同样显著：测试时机器 load average 8.8（8 核）、16G 内存已用 15G、压缩内存 7.7G、14.3G swap 用掉 13.8G（Chrome 系列约 7G）。这种内存压力下 WebKit 出现秒级停顿与具体 app 无关。
-
-结论：这条链路上能在壳里修的部分已经修了（就绪判定），剩下的耗时属于站点渲染 + 机器资源，壳无法消除。真正有效的缓解是拆分超长的代码密集会话，或在系统内存压力高时先释放内存。
-
-## 已验证 / 未验证
-
-已在本机（macOS 15.7.1、Swift 6.0.3、仅 Command Line Tools）实测：
-
-- `swift build` 通过，`swift run SelfTest` 57 项检查通过。
-- 打包启动、面板加载 chatgpt.com、设置窗口渲染与滚动正常。
-- 旧版设置迁移生效（原型保存的 toggle 快捷键与选择器被读入，随后按 schema 2 规则清掉过期选择器）。
-- `chatgptbar://paste?...&mode=replace` 写入真实输入框；`--probe-composer` 的插入 + 清空往返成功。
-- 失败路径可见：空会话下 `chatgptbar://copyLastResponse` 弹出橙色提示。
-- 下载：页面内 `<a download>` 触发 `WKDownloadDelegate`，落到 `~/Downloads` 并按 `-1`、`-2` 去重命名。
-- 附件上传：页面 `input[type=file]` 正常弹出 `NSOpenPanel`（由本 app 提供）。
-- 外链：点击站外链接不在面板内跳转，交给默认浏览器打开。
-- 加载失败层与“重新加载”按钮：断开本地测试服务器后出现，恢复后点击可重新载入。
-
-尚未实测：
-
-- Services 菜单项。`pbs -dump_pboard` 能看到服务已注册（`NSMessage = sendToChatGPT`），但 TextEdit 的服务菜单里不出现，`NSPerformService` 从脚本调用返回 false。原因是 Launch Services 把同 bundle id 的服务路由给了旧原型 bundle（见下），改 id 后条目独立注册，但仍需在系统设置里启用服务或给 app 正式签名，属于系统侧开关。
-  旧 bundle 已从 Launch Services 注销并移入废纸篓后重测：注册表里只剩 `dev.local.chatgptbar` 一条（`NSPortName = ChatGPTBar`），但 TextEdit 的服务菜单仍不出现，`NSPerformService` 仍返回 false。下一步是看系统设置 → 键盘 → 服务里的开关，或先做正式签名。
-- OAuth 弹窗登录、麦克风授权。
-- macOS 14+ 代理路径（本机 15.x，未接真实代理验证）。
-
-## 已知限制
-
-- bundle id 已从原型的 `com.local.chatgptbar` 改成 `dev.local.chatgptbar`：两个 bundle 声明同一个 id 时，Launch Services 会把 Services 和 URL Scheme 路由到它先解析到的那一个（实测路由到了旧 bundle）。设置读取会回退到旧域名，所以配置不丢。
-- 旧原型 bundle（`src/new/personal/chatgpt-bar/dist/ChatGPT Bar.app`）已移入废纸篓并从 Launch Services 注销，URL Scheme 与 Services 的归属不再歧义。
-- 没有应用图标（缺 `CFBundleIconFile` 资源），菜单栏用 SF Symbol。
-- ad-hoc 签名、未启用 hardened runtime；分发需要自行配置签名与公证。
-- `chatgpt.com` DOM 会变化，选择器仍然是需要人工维护的部分：先跑“检测选择器”，MISS 的用“导出 DOM 候选”更新。
+[MIT](LICENSE)

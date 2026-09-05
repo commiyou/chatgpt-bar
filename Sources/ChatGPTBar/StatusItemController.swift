@@ -53,19 +53,21 @@ final class StatusItemController {
 
     private func showMenu() {
         let menu = NSMenu()
-        add(menu, "显示 / 隐藏面板", handlers.toggle)
-        let pinItem = add(menu, isPinned ? "取消置顶" : "窗口置顶", handlers.togglePin)
+        add(menu, AppLocalization.text("显示 / 隐藏面板", "Show / Hide Panel"), handlers.toggle)
+        let pinItem = add(menu, isPinned
+                          ? AppLocalization.text("取消置顶", "Unpin Window")
+                          : AppLocalization.text("窗口置顶", "Pin Window"), handlers.togglePin)
         pinItem.state = isPinned ? .on : .off
         menu.addItem(.separator())
         add(menu, "New Chat", handlers.newChat)
         add(menu, "New Temp Chat", handlers.newTempChat)
-        add(menu, "复制最后一条回复", handlers.copyLastResponse)
+        add(menu, AppLocalization.text("复制最后一条回复", "Copy Last Response"), handlers.copyLastResponse)
         menu.addItem(.separator())
-        add(menu, "重新加载", handlers.reload)
-        add(menu, "在浏览器中打开", handlers.openInBrowser)
-        add(menu, "设置…", handlers.openSettings)
+        add(menu, AppLocalization.text("重新加载", "Reload"), handlers.reload)
+        add(menu, AppLocalization.text("在浏览器中打开", "Open in Browser"), handlers.openInBrowser)
+        add(menu, AppLocalization.text("设置…", "Settings…"), handlers.openSettings)
         menu.addItem(.separator())
-        add(menu, "退出 \(AppInfo.name)", handlers.quit)
+        add(menu, AppLocalization.text("退出 \(AppInfo.name)", "Quit \(AppInfo.name)"), handlers.quit)
 
         guard let button = statusItem.button else { return }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)

@@ -58,6 +58,10 @@ do {
     checkEqual(decoded.pinned, false, "persisted pinned=false survives decode")
     checkEqual(decoded.toggleShortcut, Shortcut(keyCode: 1, modifiers: CarbonModifier.option), "persisted toggle shortcut decoded")
     checkEqual(decoded.panelFrame, "{{1012, 293}, {818, 748}}", "persisted panel frame decoded")
+    checkEqual(decoded.enabledURLCommands, Set(URLSchemeCommand.allCases), "missing URL command permissions default to enabled")
+    checkEqual(decoded.appearance, .auto, "missing appearance defaults to auto")
+    checkEqual(decoded.language, .system, "missing language defaults to system")
+    checkEqual(decoded.copyLastResponseStrategy, .getLastResponse, "missing copy strategy defaults to Markdown")
 }
 
 do {
@@ -72,6 +76,20 @@ do {
     // Corrupt payload must not crash or wipe the app into an unusable state.
     store.set(Data("not json".utf8), forKey: SettingsStore.settingsKey)
     checkEqual(SettingsStore(store: store).settings.homeURL, "https://chatgpt.com", "corrupt payload falls back to defaults")
+}
+
+do {
+    var settings = AppSettings()
+    checkEqual(settings.copyLastResponseStrategy, .getLastResponse, "Markdown copy is the default strategy")
+    settings.copyLastResponseStrategy = .chatGPT
+    let store = InMemoryStore()
+    store.set(try! JSONEncoder().encode(settings), forKey: SettingsStore.settingsKey)
+    checkEqual(
+        SettingsStore(store: store).settings.copyLastResponseStrategy,
+        .chatGPT,
+        "copy strategy round-trips"
+    )
+
 }
 
 do {
@@ -119,6 +137,40 @@ do {
     checkEqual(migrated.selectors.selectors(for: .editor), SelectorSet.builtIn[.editor]!, "editor falls back to new built-ins")
     checkEqual(migrated.selectors.selectors(for: .send), ["button.my-own-send"], "hand-written selector preserved")
     checkEqual(migrated.longConversationOptimization, false, "new flag defaults to false on old payloads")
+    checkEqual(migrated.enabledURLCommands, Set(URLSchemeCommand.allCases), "schema 1 URL command permissions default to enabled")
+    checkEqual(migrated.appearance, .auto, "schema 1 appearance defaults to auto")
+    checkEqual(migrated.language, .system, "schema 1 language defaults to system")
+}
+
+do {
+    var settings = AppSettings()
+    settings.enabledURLCommands.remove(.copyLastResponse)
+    let store = InMemoryStore()
+    let encoded = try! JSONEncoder().encode(settings)
+    store.set(encoded, forKey: SettingsStore.settingsKey)
+    let decoded = SettingsStore(store: store).settings
+    check(!decoded.enabledURLCommands.contains(.copyLastResponse), "disabled URL command persists")
+    check(decoded.enabledURLCommands.contains(.paste), "other URL commands remain enabled")
+}
+
+do {
+    var settings = AppSettings()
+    settings.appearance = .dark
+    settings.language = .en
+    let store = InMemoryStore()
+    store.set(try! JSONEncoder().encode(settings), forKey: SettingsStore.settingsKey)
+    let decoded = SettingsStore(store: store).settings
+    checkEqual(decoded.appearance, .dark, "appearance persists")
+    checkEqual(decoded.language, .en, "language persists")
+}
+
+do {
+    checkEqual(URLSchemeCommand.paste.exampleURL,
+               "chatgptbar://paste?text=hello%20from%20ChatGPT%20Bar&mode=append&send=0&open=1",
+               "paste URL example is stable")
+    checkEqual((try parse(URLSchemeCommand.copyLastResponse.exampleURL)).schemeCommand,
+               .copyLastResponse,
+               "URL example parses to its command")
 }
 
 do {
@@ -164,7 +216,18 @@ do {
     check(source.contains("\\u003c/script\\u003e"), "selector text is escaped")
     check(!source.contains("</script>"), "raw script terminator never emitted")
     check(source.contains("async insert("), "bridge exposes insert")
+    check(source.contains("getLastResponse()"), "bridge exposes getLastResponse")
     check(source.contains("lastResponse()"), "bridge exposes lastResponse")
+    check(source.contains("clickCopyButton()"), "bridge exposes native page Copy trigger")
+    check(source.contains("Copy response"), "bridge prioritizes the response Copy button")
+    check(!source.contains("navigator.clipboard"), "bridge does not intercept page clipboard APIs")
+    check(!source.contains("copyViaPageButton("), "bridge does not trust page Copy payloads")
+    check(!SelectorSet.builtIn[.copyButton]!.isEmpty, "page Copy selectors are configured")
+    check(source.contains("markdownOf"), "bridge extracts Markdown from rendered replies")
+    check(source.contains("tag === 'table'"), "bridge renders Markdown tables")
+    check(source.contains("data-math-source"), "bridge preserves source math")
+    check(source.contains("$$"), "bridge renders block math delimiters")
+    check(source.contains("markdown: markdown"), "bridge returns Markdown response field")
 
     let okResponse = BridgeResponse.parse(["ok": true, "value": ["text": "hello"]])
     check(okResponse.isOK, "ok response parsed")

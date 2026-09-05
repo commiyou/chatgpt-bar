@@ -32,6 +32,7 @@ final class ShortcutRouter {
     private var monitor: Any?
     private var bindings: [(shortcut: Shortcut, action: Action)] = []
     private var recordingCompletion: ((Shortcut?) -> Void)?
+    private var lastShortcutAction: (shortcut: Shortcut, time: TimeInterval)?
 
     var isRecording: Bool { recordingCompletion != nil }
 
@@ -86,6 +87,13 @@ final class ShortcutRouter {
 
         let candidate = Shortcut(keyCode: UInt32(event.keyCode), modifiers: event.modifierFlags.carbonMask)
         guard let match = bindings.first(where: { $0.shortcut == candidate }) else { return event }
+        // Some AppKit paths deliver the same local keyDown twice; a toggle must
+        // not flip twice for one physical press.
+        let now = Date().timeIntervalSinceReferenceDate
+        if let last = lastShortcutAction, last.shortcut == candidate, now - last.time < 0.15 {
+            return nil
+        }
+        lastShortcutAction = (candidate, now)
         onAction?(match.action)
         return nil
     }

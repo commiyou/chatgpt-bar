@@ -8,7 +8,7 @@ import Foundation
 /// 2. nothing relies on a fixed delay - readiness is polled with a deadline.
 public enum BridgeScript {
     public static let globalName = "__chatgptBar"
-    public static let version = 1
+    public static let version = 2
 
     public static func source(selectors: SelectorSet) -> String {
         let json = jsonObjectLiteral(selectors.resolvedJSONObject)
@@ -56,6 +56,152 @@ public enum BridgeScript {
           }
           function isField(el) { return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT'; }
           function textOf(el) { return el.innerText || el.textContent || ''; }
+          function isNonContent(node) {
+            if (!node || node.nodeType !== 1) { return false; }
+            var tag = node.tagName.toLowerCase();
+            return tag === 'button' || tag === 'nav' || tag === 'footer'
+              || tag === 'script' || tag === 'style' || tag === 'svg';
+          }
+          function inlineMarkdown(node) {
+            if (node.nodeType === 3) {
+              return node.nodeValue.replace(/\\s+/g, ' ');
+            }
+            if (node.nodeType !== 1) { return ''; }
+            if (isNonContent(node)) { return ''; }
+            var mathSource = node.getAttribute('data-math-source');
+            if (node.getAttribute('role') === 'math' && mathSource) {
+              return '$' + mathSource + '$';
+            }
+            var tag = node.tagName.toLowerCase();
+            if (tag === 'br') { return '\\n'; }
+            if (tag === 'code' && node.parentElement && node.parentElement.tagName.toLowerCase() !== 'pre') {
+              return '`' + (node.textContent || '').replace(/`/g, '\\\\`') + '`';
+            }
+            if (tag === 'strong' || tag === 'b') { return '**' + inlineChildren(node) + '**'; }
+            if (tag === 'em' || tag === 'i') { return '*' + inlineChildren(node) + '*'; }
+            if (tag === 'del' || tag === 's') { return '~~' + inlineChildren(node) + '~~'; }
+            if (tag === 'a' && node.getAttribute('href')) {
+              return '[' + inlineChildren(node).trim() + '](' + node.getAttribute('href') + ')';
+            }
+            if (tag === 'img' && node.getAttribute('src')) {
+              return '![' + (node.getAttribute('alt') || '') + '](' + node.getAttribute('src') + ')';
+            }
+            return inlineChildren(node);
+          }
+          function inlineChildren(node) {
+            var out = '';
+            for (var child = node.firstChild; child; child = child.nextSibling) {
+              out += inlineMarkdown(child);
+            }
+            return out;
+          }
+          function markdownOf(root) {
+            function tableCellMarkdown(cell) {
+              return inlineChildren(cell)
+                .replace(/\\s+/g, ' ')
+                .replace(/\\|/g, '\\\\|')
+                .trim();
+            }
+            function tableMarkdown(table) {
+              var rows = table.querySelectorAll('tr');
+              var parsed = [];
+              for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+                var row = rows[rowIndex];
+                var cells = [];
+                var aligns = [];
+                for (var cell = row.firstElementChild; cell; cell = cell.nextElementSibling) {
+                  var cellTag = cell.tagName.toLowerCase();
+                  if (cellTag !== 'th' && cellTag !== 'td') { continue; }
+                  cells.push(tableCellMarkdown(cell));
+                  var style = (cell.getAttribute('style') || '').toLowerCase().replace(/\\s+/g, '');
+                  aligns.push(style.indexOf('text-align:right') >= 0 ? 'right'
+                    : style.indexOf('text-align:center') >= 0 ? 'center' : 'left');
+                }
+                if (cells.length) { parsed.push({ cells: cells, aligns: aligns }); }
+              }
+              if (!parsed.length) { return ''; }
+              var width = parsed.reduce(function (max, row) { return Math.max(max, row.cells.length); }, 0);
+              function padded(row) {
+                var cells = row ? row.cells.slice() : [];
+                while (cells.length < width) { cells.push(''); }
+                return '| ' + cells.join(' | ') + ' |';
+              }
+              var header = padded(parsed[0]);
+              var separators = [];
+              for (var column = 0; column < width; column++) {
+                var alignment = parsed[0].aligns[column] || 'left';
+                separators.push(alignment === 'right' ? '---:'
+                  : alignment === 'center' ? ':---:' : '---');
+              }
+              var output = '\\n' + header + '\\n| ' + separators.join(' | ') + ' |';
+              for (var bodyIndex = 1; bodyIndex < parsed.length; bodyIndex++) {
+                output += '\\n' + padded(parsed[bodyIndex]);
+              }
+              return output + '\\n\\n';
+            }
+            function render(node, depth) {
+              if (node.nodeType === 3) { return node.nodeValue.replace(/\\s+/g, ' ').trim(); }
+              if (node.nodeType !== 1) { return ''; }
+              if (isNonContent(node)) { return ''; }
+              var mathSource = node.getAttribute('data-math-source');
+              if (node.getAttribute('role') === 'math' && mathSource) {
+                return '\\n$$\\n' + mathSource + '\\n$$\\n\\n';
+              }
+              var tag = node.tagName.toLowerCase();
+              if (tag === 'pre') {
+                var code = node.querySelector('code');
+                var value = (code ? code.textContent : node.textContent || '').replace(/\\r\\n/g, '\\n').replace(/\\n+$/, '');
+                var className = code ? (code.className || '') : '';
+                var match = className.match(/language-([\\w+-]+)/);
+                return '\\n```' + (match ? match[1] : '') + '\\n' + value + '\\n```\\n';
+              }
+              if (tag === 'table') { return tableMarkdown(node); }
+              if (/^h[1-6]$/.test(tag)) {
+                return '\\n' + '#'.repeat(parseInt(tag.slice(1), 10)) + ' ' + inlineChildren(node).trim() + '\\n\\n';
+              }
+              if (tag === 'blockquote') {
+                var quote = '';
+                for (var quoteChild = node.firstChild; quoteChild; quoteChild = quoteChild.nextSibling) {
+                  quote += quoteChild.nodeType === 1 ? render(quoteChild, depth) : inlineMarkdown(quoteChild);
+                }
+                return '\\n' + quote.trim().split('\\n').map(function (line) { return '> ' + line; }).join('\\n') + '\\n\\n';
+              }
+              if (tag === 'hr') { return '\\n---\\n\\n'; }
+              if (tag === 'ul' || tag === 'ol') {
+                var ordered = tag === 'ol';
+                var index = 1;
+                var lines = [];
+                for (var item = node.firstElementChild; item; item = item.nextElementSibling) {
+                  if (item.tagName.toLowerCase() !== 'li') { continue; }
+                  var nested = '';
+                  var content = '';
+                  for (var child = item.firstChild; child; child = child.nextSibling) {
+                    if (child.nodeType === 1 && (child.tagName.toLowerCase() === 'ul' || child.tagName.toLowerCase() === 'ol')) {
+                      nested += render(child, depth + 1);
+                    } else {
+                      content += inlineMarkdown(child);
+                    }
+                  }
+                  var prefix = ordered ? (index++) + '. ' : '- ';
+                  lines.push('  '.repeat(depth) + prefix + content.trim() + (nested ? '\\n' + nested.trimEnd() : ''));
+                }
+                return '\\n' + lines.join('\\n') + '\\n\\n';
+              }
+              if (tag === 'p' || tag === 'div' || tag === 'section' || tag === 'article') {
+                var body = '';
+                for (var child = node.firstChild; child; child = child.nextSibling) {
+                  body += child.nodeType === 1 ? render(child, depth) : inlineMarkdown(child);
+                }
+                return body.trim() ? '\\n' + body.trim() + '\\n\\n' : '';
+              }
+              return inlineChildren(node);
+            }
+            var result = '';
+            for (var child = root.firstChild; child; child = child.nextSibling) {
+              result += child.nodeType === 1 ? render(child, 0) : inlineMarkdown(child);
+            }
+            return result.replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+          }
           function caretToEnd(el) {
             el.focus();
             if (isField(el)) {
@@ -114,7 +260,40 @@ public enum BridgeScript {
             el.dispatchEvent(new KeyboardEvent('keydown', init));
             el.dispatchEvent(new KeyboardEvent('keyup', init));
           }
-
+          function firstButtonInScope(scope) {
+            var selectors = list('copyButton');
+            var fallback = null;
+            for (var i = 0; i < selectors.length; i++) {
+              try {
+                var nodes = scope.querySelectorAll(selectors[i]);
+                for (var j = 0; j < nodes.length; j++) {
+                  var button = nodes[j];
+                  if (button.tagName.toLowerCase() !== 'button' || !isEnabled(button)) { continue; }
+                  var label = (button.getAttribute('aria-label') || button.getAttribute('title') || button.textContent || '').trim().toLowerCase();
+                  if (label === 'copy response' || label === '复制回复') {
+                    return { el: button, selector: selectors[i] };
+                  }
+                  if (!fallback && !button.closest('pre, table')
+                      && label !== 'copy table' && label !== '复制表格'
+                      && label !== 'copy message' && label !== '复制消息') {
+                    fallback = { el: button, selector: selectors[i] };
+                  }
+                }
+              } catch (e) {}
+            }
+            return fallback;
+          }
+          function copyButtonForLastResponse() {
+            var hit = allMatches('assistant');
+            if (!hit) { return null; }
+            var last = hit.nodes[hit.nodes.length - 1];
+            var scope = last;
+            for (var depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
+              var button = firstButtonInScope(scope);
+              if (button) { return { button: button.el, selector: button.selector }; }
+            }
+            return null;
+          }
           // Frame-time sampler. WebKit has no Long Tasks API, so jank is
           // measured as requestAnimationFrame gaps. Only runs while sampling.
           var perf = null;
@@ -209,13 +388,27 @@ public enum BridgeScript {
               return ok({ cleared: true });
             },
 
-            lastResponse() {
+            getLastResponse() {
               var hit = allMatches('assistant');
               if (!hit) { return fail('assistant_not_found'); }
               var last = hit.nodes[hit.nodes.length - 1];
-              var text = textOf(last);
-              if (!text) { return fail('assistant_empty', hit.selector); }
-              return ok({ text: text, selector: hit.selector, count: hit.nodes.length });
+              var markdown = '';
+              try { markdown = markdownOf(last); } catch (e) { markdown = textOf(last); }
+              if (!markdown) { return fail('assistant_empty', hit.selector); }
+              return ok({ markdown: markdown, text: markdown, selector: hit.selector, count: hit.nodes.length });
+            },
+
+            // Kept as a compatibility alias for older callers.
+            lastResponse() {
+              return this.getLastResponse();
+            },
+
+            clickCopyButton() {
+              var hit = copyButtonForLastResponse();
+              if (!hit) { return fail('copy_button_not_found'); }
+              if (!isEnabled(hit.button)) { return fail('copy_button_disabled', hit.selector); }
+              hit.button.click();
+              return ok({ selector: hit.selector, strategy: 'chatgpt-copy-button' });
             },
 
             newChat() {
@@ -444,6 +637,12 @@ public enum BridgeErrorText {
             return "找不到回复内容（assistant 选择器失配）"
         case "assistant_empty":
             return "最后一条回复为空"
+        case "copy_button_not_found":
+            return "找不到页面 Copy 按钮（可在页面适配中检查 copyButton 选择器）"
+        case "copy_button_disabled":
+            return "页面 Copy 按钮不可用"
+        case "page_copy_not_captured":
+            return "未能捕获页面 Copy 内容，已尝试从渲染 DOM 回退"
         case "not_loaded":
             return "页面尚未加载完成"
         case "bridge_missing":

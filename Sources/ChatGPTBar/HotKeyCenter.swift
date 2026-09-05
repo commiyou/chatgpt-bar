@@ -17,13 +17,13 @@ final class HotKeyCenter {
         var errorDescription: String? {
             switch self {
             case .needsModifier:
-                return "全局快捷键至少需要一个 ⌘ / ⌥ / ⌃ 修饰键"
+                return AppLocalization.text("全局快捷键至少需要一个 ⌘ / ⌥ / ⌃ 修饰键", "The global shortcut needs ⌘, ⌥, or ⌃")
             case .handlerInstallFailed(let status):
-                return "无法安装快捷键事件处理器（OSStatus \(status)）"
+                return AppLocalization.text("无法安装快捷键事件处理器（OSStatus \(status)）", "Could not install the shortcut event handler (OSStatus \(status))")
             case .registrationFailed(let status):
                 return status == OSStatus(eventHotKeyExistsErr)
-                    ? "该快捷键已被其他应用占用"
-                    : "快捷键注册失败（OSStatus \(status)）"
+                    ? AppLocalization.text("该快捷键已被其他应用占用", "That shortcut is already used by another app")
+                    : AppLocalization.text("快捷键注册失败（OSStatus \(status)）", "Shortcut registration failed (OSStatus \(status))")
             }
         }
     }

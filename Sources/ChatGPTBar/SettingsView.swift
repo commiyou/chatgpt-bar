@@ -2,7 +2,7 @@ import SwiftUI
 import ChatGPTBarKit
 
 enum SettingsTab: String, Hashable, CaseIterable {
-    case general, shortcuts, page
+    case general, shortcuts, urlScheme, page
 
     init?(flag: String?) {
         guard let flag, let value = SettingsTab(rawValue: flag) else { return nil }
@@ -17,11 +17,29 @@ enum ShortcutSlot: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .toggle: return "显示 / 隐藏面板"
-        case .pin: return "窗口置顶"
+        case .toggle: return AppLocalization.text("显示 / 隐藏面板", "Show / Hide Panel")
+        case .pin: return AppLocalization.text("窗口置顶", "Pin Window")
         case .newChat: return "New Chat"
         case .newTempChat: return "New Temp Chat"
-        case .copyLastResponse: return "复制最后一条回复"
+        case .copyLastResponse: return AppLocalization.text("复制最后一条回复", "Copy Last Response")
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .toggle:
+            return AppLocalization.text("全局快捷键，显示或隐藏 ChatGPT Bar 面板.", "Global shortcut to show or hide the ChatGPT Bar panel.")
+        case .pin:
+            return AppLocalization.text(
+                "切换面板的 floating window level。它会覆盖普通窗口，但不会覆盖系统级安全界面或某些全屏独占窗口。",
+                "Toggles the floating window level. It stays above normal windows, but not system security UI or some exclusive full-screen windows."
+            )
+        case .newChat:
+            return AppLocalization.text("仅在聊天面板聚焦时生效，创建普通新会话。", "Works only when the chat panel is focused and creates a normal conversation.")
+        case .newTempChat:
+            return AppLocalization.text("仅在聊天面板聚焦时生效，创建临时会话。", "Works only when the chat panel is focused and creates a temporary conversation.")
+        case .copyLastResponse:
+            return AppLocalization.text("仅在聊天面板聚焦时生效，按“最后回复复制方式”设置复制最后一条助手回复。", "Works only when the chat panel is focused and follows the selected last-response copy strategy.")
         }
     }
 
@@ -163,7 +181,7 @@ final class SettingsModel: ObservableObject {
         isBusy = true
         environment.probeSelectors { [weak self] text in
             self?.isBusy = false
-            self?.result = TextResult(title: "选择器检测", body: text)
+            self?.result = TextResult(title: AppLocalization.text("选择器检测", "Selector Detection"), body: text)
         }
     }
 
@@ -171,7 +189,7 @@ final class SettingsModel: ObservableObject {
         isBusy = true
         environment.dumpDOM { [weak self] text in
             self?.isBusy = false
-            self?.result = TextResult(title: "DOM 候选", body: text)
+            self?.result = TextResult(title: AppLocalization.text("DOM 候选", "DOM Candidates"), body: text)
         }
     }
 
@@ -181,7 +199,43 @@ final class SettingsModel: ObservableObject {
             self?.isBusy = false
             let body = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "\(report)"
-            self?.result = TextResult(title: "性能诊断（采样 6 秒）", body: body)
+            self?.result = TextResult(title: AppLocalization.text("性能诊断（采样 6 秒）", "Performance Diagnostic (6s sample)"), body: body)
+        }
+    }
+
+    func testURLScheme(_ command: URLSchemeCommand) {
+        _ = apply()
+        guard draft.enabledURLCommands.contains(command) else {
+            result = TextResult(
+                title: AppLocalization.text("URL Scheme 测试", "URL Scheme Test"),
+                body: AppLocalization.text("该命令当前已禁用，请先打开开关。", "This command is disabled. Enable it first.")
+            )
+            return
+        }
+        guard let url = URL(string: command.exampleURL) else { return }
+        environment.testURLScheme(url)
+        result = TextResult(
+            title: AppLocalization.text("URL Scheme 测试", "URL Scheme Test"),
+            body: AppLocalization.text(
+                "已触发：\(command.exampleURL)\n\n粘贴测试使用 send=0，不会自动发送。",
+                "Triggered: \(command.exampleURL)\n\nPaste tests use send=0 and do not auto-submit."
+            )
+        )
+    }
+
+    func copyURLScheme(_ command: URLSchemeCommand) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command.exampleURL, forType: .string)
+    }
+
+    func clearChatWebsiteData() {
+        isBusy = true
+        environment.clearChatWebsiteData { [weak self] message in
+            self?.isBusy = false
+            self?.result = TextResult(
+                title: AppLocalization.text("清除网站数据", "Clear Website Data"),
+                body: message
+            )
         }
     }
 }
@@ -199,20 +253,23 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             TabView(selection: $selection) {
                 GeneralTab(model: model)
-                    .tabItem { Label("通用", systemImage: "gearshape") }
+                    .tabItem { Label(AppLocalization.text("通用", "General"), systemImage: "gearshape") }
                     .tag(SettingsTab.general)
                 ShortcutsTab(model: model)
-                    .tabItem { Label("快捷键", systemImage: "command") }
+                    .tabItem { Label(AppLocalization.text("快捷键", "Shortcuts"), systemImage: "command") }
                     .tag(SettingsTab.shortcuts)
+                URLSchemeTab(model: model)
+                    .tabItem { Label("URL Scheme", systemImage: "link") }
+                    .tag(SettingsTab.urlScheme)
                 PageTab(model: model)
-                    .tabItem { Label("页面适配", systemImage: "curlybraces") }
+                    .tabItem { Label(AppLocalization.text("页面适配", "Page Adaptation"), systemImage: "curlybraces") }
                     .tag(SettingsTab.page)
             }
 
             Divider()
             FooterBar(model: model)
         }
-        .frame(minWidth: 600, minHeight: 540)
+        .frame(minWidth: 680, minHeight: 620)
         .sheet(item: $model.result) { result in
             ResultSheet(result: result) { model.result = nil }
         }
@@ -237,9 +294,9 @@ private struct FooterBar: View {
             }
             Spacer(minLength: 0)
             if model.isBusy { ProgressView().controlSize(.small) }
-            Button("取消") { model.cancel() }
+            Button(AppLocalization.text("取消", "Cancel")) { model.cancel() }
                 .keyboardShortcut(.cancelAction)
-            Button("保存并应用") { model.save() }
+            Button(AppLocalization.text("保存并应用", "Save & Apply")) { model.save() }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
         }
@@ -254,35 +311,71 @@ private struct GeneralTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle("不抢占焦点", isOn: $model.draft.nonActivating)
-                LabeledContent("首页地址") {
+                Toggle(AppLocalization.text("不抢占焦点", "Do not activate app"), isOn: $model.draft.nonActivating)
+                LabeledContent(AppLocalization.text("首页地址", "Home URL")) {
                     TextField("", text: $model.draft.homeURL, prompt: Text("https://chatgpt.com"))
                         .textFieldStyle(.roundedBorder)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: 300)
                 }
             } header: {
-                Text("面板")
+                Text(AppLocalization.text("面板", "Panel"))
             } footer: {
-                Text("关闭“不抢占焦点”后，面板会像普通窗口一样激活应用。切换该项会重建窗口。")
+                Text(AppLocalization.text(
+                    "关闭“不抢占焦点”后，面板会像普通窗口一样激活应用。切换该项会重建窗口。",
+                    "When disabled, the panel activates the app like a normal window. Changing this rebuilds the panel."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                Toggle("允许 chatgptbar:// 免确认直接发送", isOn: $model.draft.allowURLSchemeAutoSend)
+                Picker(AppLocalization.text("外观", "Appearance"), selection: $model.draft.appearance) {
+                    ForEach(AppAppearance.allCases, id: \.self) { appearance in
+                        Text(appearance.displayName).tag(appearance)
+                    }
+                }
+                Picker(AppLocalization.text("语言", "Language"), selection: $model.draft.language) {
+                    ForEach(AppLanguage.allCases, id: \.self) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
             } header: {
-                Text("安全")
+                    Text(AppLocalization.text("外观与语言", "Appearance & Language"))
             } footer: {
-                Text("任何进程或网页都能触发 URL Scheme。关闭时，带 send=1 的调用会先弹出确认框并显示待发送内容。")
+                Text(AppLocalization.text(
+                    "外观支持自动、浅色和深色；语言支持跟随系统、简体中文和 English。保存后对新打开的窗口生效。",
+                    "Appearance supports Auto, Light, and Dark. Language supports System, Simplified Chinese, and English. Changes apply to newly opened windows."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                Toggle("启用 HTTP CONNECT 代理", isOn: $model.draft.proxy.enabled)
+                Picker(
+                    AppLocalization.text("最后回复复制方式", "Last response copy strategy"),
+                    selection: $model.draft.copyLastResponseStrategy
+                ) {
+                    ForEach(CopyLastResponseStrategy.allCases, id: \.self) { strategy in
+                        Text(AppLocalization.usesEnglish ? strategy.displayNameEnglish : strategy.displayName)
+                            .tag(strategy)
+                    }
+                }
+            } header: {
+                Text(AppLocalization.text("复制", "Copy"))
+            } footer: {
+                Text(AppLocalization.text(
+                    "Markdown（getLastResponse）从已渲染的助手回复重建 Markdown；GPT 原生 Copy 会点击页面自己的 Copy 按钮并等待系统剪贴板变化，不会拦截页面 clipboard API。",
+                    "Markdown (getLastResponse) rebuilds Markdown from the rendered assistant response. ChatGPT native Copy clicks the page's own Copy button and waits for the system pasteboard without intercepting page clipboard APIs."
+                ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(AppLocalization.text("启用 HTTP CONNECT 代理", "Enable HTTP CONNECT proxy"), isOn: $model.draft.proxy.enabled)
                     .disabled(!model.supportsProxy)
-                LabeledContent("地址") {
+                LabeledContent(AppLocalization.text("地址", "Address")) {
                     HStack(spacing: 8) {
                         TextField("host", text: $model.draft.proxy.host)
                             .textFieldStyle(.roundedBorder)
@@ -294,11 +387,114 @@ private struct GeneralTab: View {
                 }
                 .disabled(!model.supportsProxy || !model.draft.proxy.enabled)
             } header: {
-                Text("代理")
+                Text(AppLocalization.text("代理", "Proxy"))
             } footer: {
                 Text(model.supportsProxy
-                     ? "通过 WKWebsiteDataStore.proxyConfigurations 生效，保存后会重新加载页面。"
-                     : "当前系统低于 macOS 14，WKWebView 无法按应用配置代理，请改用系统代理。")
+                     ? AppLocalization.text(
+                         "通过 WKWebsiteDataStore.proxyConfigurations 生效，保存后会重新加载页面。",
+                         "Uses WKWebsiteDataStore.proxyConfigurations and reloads the page after saving."
+                       )
+                     : AppLocalization.text(
+                         "当前系统低于 macOS 14，WKWebView 无法按应用配置代理，请改用系统代理。",
+                         "On macOS versions below 14, WKWebView cannot configure an app proxy. Use the system proxy instead."
+                       ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Button(AppLocalization.text("清除 ChatGPT 网站数据…", "Clear ChatGPT Website Data…")) {
+                    model.clearChatWebsiteData()
+                }
+                .disabled(model.isBusy)
+            } header: {
+                Text(AppLocalization.text("数据与缓存", "Data & Cache"))
+            } footer: {
+                Text(AppLocalization.text(
+                    "只清除 ChatGPT/OpenAI 在本应用 WKWebView 中的 Cookie、缓存和本地存储，可能需要重新登录；不会清除应用设置，也不会影响 Chrome。",
+                    "Clears only ChatGPT/OpenAI cookies, cache, and local storage in this app's WKWebView. You may need to sign in again. App settings and Chrome are not affected."
+                ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct URLSchemeTab: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section {
+                Text(AppLocalization.text(
+                    "chatgptbar:// 是给其他应用、脚本或自动化工具调用 ChatGPT Bar 的本地 URL Scheme。每个命令都可以单独关闭。",
+                    "chatgptbar:// is a local URL Scheme for other apps, scripts, and automations to call ChatGPT Bar. Each command can be disabled independently."
+                ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(AppLocalization.text(
+                    "测试按钮会走和外部调用相同的解析与权限链路；粘贴命令固定使用 send=0，避免测试时误发送。",
+                    "Test buttons use the same parser and permission path as external calls. Paste tests always use send=0 to avoid accidental submission."
+                ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text(AppLocalization.text("调用说明", "How It Works"))
+            }
+
+            Section {
+                ForEach(URLSchemeCommand.allCases, id: \.self) { command in
+                    VStack(alignment: .leading, spacing: 7) {
+                        Toggle(
+                            AppLocalization.usesEnglish ? command.displayNameEnglish : command.displayName,
+                            isOn: Binding(
+                                get: { model.draft.enabledURLCommands.contains(command) },
+                                set: { enabled in
+                                    if enabled {
+                                        model.draft.enabledURLCommands.insert(command)
+                                    } else {
+                                        model.draft.enabledURLCommands.remove(command)
+                                    }
+                                }
+                            )
+                        )
+                        .help(AppLocalization.usesEnglish ? command.helpTextEnglish : command.helpText)
+
+                        Text(AppLocalization.usesEnglish ? command.helpTextEnglish : command.helpText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(command.exampleURL)
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button(AppLocalization.text("复制命令", "Copy Command")) { model.copyURLScheme(command) }
+                                .buttonStyle(.borderless)
+                            Button(AppLocalization.text("测试", "Test")) { model.testURLScheme(command) }
+                                .disabled(!model.draft.enabledURLCommands.contains(command))
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            } header: {
+                Text(AppLocalization.text("命令列表", "Commands"))
+            }
+
+            Section {
+                Toggle(
+                    AppLocalization.text("允许 chatgptbar:// 免确认直接发送", "Allow chatgptbar:// to submit without confirmation"),
+                    isOn: $model.draft.allowURLSchemeAutoSend
+                )
+            } header: {
+                Text(AppLocalization.text("安全", "Security"))
+            } footer: {
+                Text(AppLocalization.text(
+                    "任何进程或网页都能触发 URL Scheme。关闭时，带 send=1 的调用会先弹出确认框并显示待发送内容。这个开关只影响自动发送，不影响 paste 的 send=0 测试。",
+                    "Any process or webpage can trigger the URL Scheme. When disabled, send=1 calls show a confirmation with a preview. This only affects auto-submit, not paste tests with send=0."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -319,9 +515,12 @@ private struct ShortcutsTab: View {
                     }
                 }
             } header: {
-                Text("快捷键")
+                Text(AppLocalization.text("快捷键", "Shortcuts"))
             } footer: {
-                Text("“显示 / 隐藏面板”是全局快捷键，至少需要一个 ⌘ / ⌥ / ⌃；其余仅在聊天面板聚焦时生效。录制时按 Esc 取消。")
+                Text(AppLocalization.text(
+                    "“显示 / 隐藏面板”是全局快捷键，至少需要一个 ⌘ / ⌥ / ⌃；其余仅在聊天面板聚焦时生效。录制时按 Esc 取消。",
+                    "Show / Hide Panel is global and requires ⌘, ⌥, or ⌃. Other shortcuts work only when the chat panel is focused. Press Esc to cancel recording."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -346,6 +545,7 @@ private struct ShortcutField: View {
                     .monospacedDigit()
                     .frame(minWidth: 132)
             }
+            .help(slot.helpText)
             .disabled(model.recording != nil && !isRecording)
 
             Button {
@@ -354,14 +554,15 @@ private struct ShortcutField: View {
                 Image(systemName: "delete.left")
             }
             .buttonStyle(.borderless)
-            .help("清除该快捷键")
+            .help(AppLocalization.text("清除该快捷键", "Clear this shortcut"))
             .disabled(slot.value(in: model.draft) == nil)
         }
     }
 
     private var label: String {
-        if isRecording { return "按下快捷键…" }
-        return slot.value(in: model.draft)?.displayString ?? "未设置"
+        if isRecording { return AppLocalization.text("按下快捷键…", "Press a shortcut…") }
+        return slot.value(in: model.draft)?.displayString
+            ?? AppLocalization.text("未设置", "Not set")
     }
 }
 
@@ -376,8 +577,9 @@ private struct PageTab: View {
                         HStack(spacing: 6) {
                             Text(key.displayName)
                                 .font(.callout.weight(.medium))
+                                .help(AppLocalization.usesEnglish ? key.helpTextEnglish : key.helpText)
                             if model.isOverridden(key) {
-                                Text("已修改")
+                                Text(AppLocalization.text("已修改", "Modified"))
                                     .font(.caption2)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
@@ -385,33 +587,56 @@ private struct PageTab: View {
                             }
                         }
                         SelectorEditor(text: model.binding(for: key))
+                            .help(AppLocalization.usesEnglish ? key.helpTextEnglish : key.helpText)
+                        Text(AppLocalization.usesEnglish ? key.helpTextEnglish : key.helpText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 2)
                 }
             } header: {
-                Text("页面选择器")
+                Text(AppLocalization.text("页面选择器", "Page Selectors"))
             } footer: {
-                Text("每行一个 CSS 选择器，按顺序命中第一个；逗号不是分隔符，`:is(a, b)` 是合法写法。发送按钮只在输入框非空时存在，检测前请先在面板里输入几个字。")
+                Text(AppLocalization.text(
+                    "每行一个 CSS 选择器，按顺序命中第一个；逗号不是分隔符，`:is(a, b)` 是合法写法。发送按钮只在输入框非空时存在，检测前请先在面板里输入几个字。",
+                    "Enter one CSS selector per line; the first matching selector wins. Commas are not separators, and :is(a, b) is valid CSS. The send button appears only when the editor has content, so type a few characters before testing."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Section {
                 HStack(spacing: 10) {
-                    Button("检测选择器") { model.testSelectors() }
-                    Button("导出 DOM 候选") { model.dumpDOM() }
+                    Button(AppLocalization.text("检测选择器", "Test Selectors")) { model.testSelectors() }
+                        .help("按当前页面逐个执行每个 CSS 选择器，报告命中、失配或 CSS 语法错误；不会自动替换你的配置。")
+                    Button(AppLocalization.text("导出 DOM 候选", "Export DOM Candidates")) { model.dumpDOM() }
+                        .help("扫描当前页面的 data-testid、aria-label、消息角色和可编辑节点，生成可用于更新选择器的候选清单。")
                     Spacer()
-                    Button("恢复内置默认") { model.resetSelectors() }
+                    Button(AppLocalization.text("恢复内置默认", "Restore Built-ins")) { model.resetSelectors() }
                 }
             }
 
             Section {
-                Toggle("长会话渲染优化（实验性）", isOn: $model.draft.longConversationOptimization)
-                Button("运行性能诊断（采样 6 秒）") { model.runDiagnostics() }
+                Text(AppLocalization.text("检测逻辑", "Detection Logic"))
+                    .font(.callout.weight(.medium))
+                Text(AppLocalization.text(
+                    "检测会在当前页面对每个选择器调用 querySelector；找到节点显示 OK，找不到显示 MISS，CSS 语法非法显示 ERR。它只观察当前 DOM，不会点击、发送或修改页面。",
+                    "Detection calls querySelector for every selector on the current page. It reports OK, MISS, or ERR for invalid CSS. It only observes the DOM and never clicks, submits, or edits the page."
+                ))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(AppLocalization.text("长会话渲染优化（实验性）", "Long-conversation rendering optimization (Experimental)"), isOn: $model.draft.longConversationOptimization)
+                Button(AppLocalization.text("运行性能诊断（采样 6 秒）", "Run performance diagnostic (6s sample)")) { model.runDiagnostics() }
             } header: {
-                Text("性能")
+                Text(AppLocalization.text("性能", "Performance"))
             } footer: {
-                Text("优化会对视口外的会话轮次跳过布局与绘制。在 49000px、358 个代码块的会话上做过双向 A/B，没有稳定收益，因此默认关闭；卡顿主要来自页面自身渲染。")
+                Text(AppLocalization.text(
+                    "优化会对视口外的会话轮次跳过布局与绘制。在 49000px、358 个代码块的会话上做过双向 A/B，没有稳定收益，因此默认关闭；卡顿主要来自页面自身渲染。",
+                    "Optimization skips layout and paint for off-screen turns. A two-way A/B on a 49,000px conversation with 358 code blocks showed no stable gain, so it is off by default; most jank comes from page rendering."
+                ))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -453,7 +678,7 @@ private struct ResultSheet: View {
             .padding(.bottom, 12)
 
             ScrollView {
-                Text(result.body.isEmpty ? "（无内容）" : result.body)
+                Text(result.body.isEmpty ? AppLocalization.text("（无内容）", "(empty)") : result.body)
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -463,12 +688,12 @@ private struct ResultSheet: View {
 
             Divider()
             HStack {
-                Button("复制到剪贴板") {
+                Button(AppLocalization.text("复制到剪贴板", "Copy to Clipboard")) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(result.body, forType: .string)
                 }
                 Spacer()
-                Button("关闭") { dismiss() }
+                Button(AppLocalization.text("关闭", "Close")) { dismiss() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
             }

@@ -51,7 +51,12 @@ final class Feedback {
     }
 
     /// Confirmation used before the URL scheme is allowed to submit a prompt.
-    func confirm(title: String, message: String, confirmTitle: String, cancelTitle: String = "取消") -> Bool {
+    func confirm(
+        title: String,
+        message: String,
+        confirmTitle: String,
+        cancelTitle: String = AppLocalization.text("取消", "Cancel")
+    ) -> Bool {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning

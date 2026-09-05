@@ -25,20 +25,22 @@ final class ChatWebController: NSObject {
     private(set) var lastCommitSeconds: Double?
 
     private var homeURL: URL
+    private var copyLastResponseStrategy: CopyLastResponseStrategy
     /// Remembered so retry-after-failure reloads the page that failed instead
     /// of silently falling back to the home page.
     private var lastRequestedURL: URL?
 
     init(settings: AppSettings) {
         self.homeURL = settings.resolvedHomeURL
+        self.copyLastResponseStrategy = settings.copyLastResponseStrategy
         self.policy = ChatWebController.makePolicy(homeURL: settings.resolvedHomeURL)
         super.init()
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.userContentController = userContentController
-        // Append to the stock UA instead of pinning a Safari version that rots.
-        configuration.applicationNameForUserAgent = "ChatGPTBar/\(AppInfo.shortVersion)"
+        // Keep WebKit's stock User-Agent. A custom product suffix changes the
+        // device fingerprint without improving compatibility.
         configuration.preferences.isElementFullscreenEnabled = true
 
         installScripts(settings: settings)
@@ -89,6 +91,34 @@ final class ChatWebController: NSObject {
             webView.load(URLRequest(url: last))
         } else {
             loadHome()
+        }
+    }
+
+    /// Clears only ChatGPT/OpenAI website data owned by this WKWebView store.
+    /// App settings and other browsers are untouched.
+    func clearChatWebsiteData(completion: @escaping (String) -> Void) {
+        let store = WKWebsiteDataStore.default()
+        let allTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        store.fetchDataRecords(ofTypes: allTypes) { [weak self] records in
+            let targets = records.filter { record in
+                let name = record.displayName.lowercased()
+                return name.contains("chatgpt")
+                    || name.contains("openai")
+                    || name.contains("oaistatic")
+                    || name.contains("oaiusercontent")
+                    || name.contains("auth0")
+            }
+            store.removeData(ofTypes: allTypes, for: targets) {
+                DispatchQueue.main.async {
+                    self?.isPageReady = false
+                    self?.pending.removeAll()
+                    self?.loadHome()
+                    completion(AppLocalization.text(
+                        "已清除 \(targets.count) 个 ChatGPT/OpenAI 网站数据记录，并重新加载页面。",
+                        "Cleared \(targets.count) ChatGPT/OpenAI website data records and reloaded the page."
+                    ))
+                }
+            }
         }
     }
 
@@ -183,10 +213,10 @@ final class ChatWebController: NSObject {
             arguments: ["text": text, "mode": mode.rawValue, "submitAfter": submit]
         ) { response in
             if !response.isOK {
-                Feedback.shared.toast("插入失败：\(BridgeErrorText.describe(response.error))", kind: .failure)
+                Feedback.shared.toast(AppLocalization.text("插入失败：\(BridgeErrorText.describe(response.error))", "Insert failed: \(BridgeErrorText.describe(response.error))"), kind: .failure)
             } else if submit, response.bool("submitted") == false {
                 let reason = BridgeErrorText.describe(response.value?["submitError"] as? String)
-                Feedback.shared.toast("已插入，但发送失败：\(reason)", kind: .failure)
+                Feedback.shared.toast(AppLocalization.text("已插入，但发送失败：\(reason)", "Inserted, but submit failed: \(reason)"), kind: .failure)
             }
             completion?(response)
         }
@@ -195,7 +225,7 @@ final class ChatWebController: NSObject {
     func newChat() {
         call("return window.\(BridgeScript.globalName).newChat();") { response in
             if !response.isOK {
-                Feedback.shared.toast("New Chat 失败：\(BridgeErrorText.describe(response.error))", kind: .failure)
+                Feedback.shared.toast(AppLocalization.text("New Chat 失败：\(BridgeErrorText.describe(response.error))", "New Chat failed: \(BridgeErrorText.describe(response.error))"), kind: .failure)
             }
         }
     }
@@ -203,34 +233,105 @@ final class ChatWebController: NSObject {
     func newTempChat() {
         call("return window.\(BridgeScript.globalName).tempChat();") { response in
             guard response.isOK else {
-                Feedback.shared.toast("Temp Chat 失败：\(BridgeErrorText.describe(response.error))", kind: .failure)
+                Feedback.shared.toast(AppLocalization.text("Temp Chat 失败：\(BridgeErrorText.describe(response.error))", "Temporary Chat failed: \(BridgeErrorText.describe(response.error))"), kind: .failure)
                 return
             }
             if response.string("strategy") == "navigate" {
-                Feedback.shared.toast("未找到 Temp Chat 按钮，已改用 ?temporary-chat=true 链接")
+                Feedback.shared.toast(AppLocalization.text("未找到 Temp Chat 按钮，已改用 ?temporary-chat=true 链接", "Temporary Chat button not found; using ?temporary-chat=true instead"))
             }
         }
     }
 
-    /// Copies the last answer natively: no dependency on the page's own
-    /// English-only "Copy message" button.
+    /// Reads the latest assistant response from the rendered page.
+    ///
+    /// The bridge returns both `markdown` and the legacy `text` key. Keeping
+    /// this as a separate operation makes the read path usable by diagnostics
+    /// and keeps clipboard writing in the native layer.
+    func getLastResponse(completion: @escaping (BridgeResponse) -> Void) {
+        call("return window.\(BridgeScript.globalName).getLastResponse();", completion: completion)
+    }
+
+    func updateCopyLastResponseStrategy(_ strategy: CopyLastResponseStrategy) {
+        copyLastResponseStrategy = strategy
+    }
+
+    /// Copies the latest assistant response using the configured strategy.
+    ///
+    /// Do not intercept `navigator.clipboard`: the page's Copy action can
+    /// write a partial/plain-text payload, and wrapping the API changes page
+    /// behavior globally. The rendered assistant DOM is the stable source for
+    /// this app's Markdown contract.
     func copyLastResponse() {
-        call("return window.\(BridgeScript.globalName).lastResponse();") { response in
-            guard response.isOK, let text = response.string("text"), !text.isEmpty else {
-                Feedback.shared.toast("复制失败：\(BridgeErrorText.describe(response.error))", kind: .failure)
+        if copyLastResponseStrategy == .chatGPT {
+            copyUsingChatGPT()
+            return
+        }
+        getLastResponse { [weak self] response in
+            guard response.isOK,
+                  let markdown = response.string("markdown") ?? response.string("text"),
+                  !markdown.isEmpty else {
+                Feedback.shared.toast(AppLocalization.text("复制失败：\(BridgeErrorText.describe(response.error))", "Copy failed: \(BridgeErrorText.describe(response.error))"), kind: .failure)
                 return
             }
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-            Feedback.shared.toast("已复制最后一条回复（\(text.count) 字）")
+            self?.writeResponseToPasteboard(markdown, strategy: "DOM Markdown")
         }
+    }
+
+    /// Triggers the page's own Copy button, then observes the native pasteboard.
+    /// This preserves the page result without replacing any page API.
+    private func copyUsingChatGPT() {
+        let pasteboard = NSPasteboard.general
+        let changeCount = pasteboard.changeCount
+        call("return window.\(BridgeScript.globalName).clickCopyButton();") { [weak self] response in
+            guard let self else { return }
+            guard response.isOK else {
+                Feedback.shared.toast(AppLocalization.text(
+                    "GPT 原生 Copy 失败：\(BridgeErrorText.describe(response.error))",
+                    "ChatGPT native Copy failed: \(BridgeErrorText.describe(response.error))"
+                ), kind: .failure)
+                return
+            }
+            self.waitForPasteboardChange(from: changeCount, deadline: Date().addingTimeInterval(2.0))
+        }
+    }
+
+    private func waitForPasteboardChange(from previousChangeCount: Int, deadline: Date) {
+        let pasteboard = NSPasteboard.general
+        let hasContent = pasteboard.string(forType: .string)?.isEmpty == false
+            || pasteboard.types?.contains(.html) == true
+        if pasteboard.changeCount != previousChangeCount && hasContent {
+            Feedback.shared.toast(AppLocalization.text(
+                "已复制最后一条回复（GPT 原生 Copy）",
+                "Copied the latest response (ChatGPT native Copy)"
+            ))
+            return
+        }
+        guard Date() < deadline else {
+            Feedback.shared.toast(AppLocalization.text(
+                "GPT 原生 Copy 未写入系统剪贴板，请重试。",
+                "ChatGPT native Copy did not update the system pasteboard. Try again."
+            ), kind: .failure)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.waitForPasteboardChange(from: previousChangeCount, deadline: deadline)
+        }
+    }
+
+    private func writeResponseToPasteboard(_ text: String, strategy: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        Feedback.shared.toast(AppLocalization.text(
+            "已复制最后一条回复（\(text.count) 字，\(strategy)）",
+            "Copied the latest response (\(text.count) characters, \(strategy))"
+        ))
     }
 
     func probeSelectors(completion: @escaping (String) -> Void) {
         call("return window.\(BridgeScript.globalName).probe();") { response in
             guard response.isOK, let results = response.array("results") else {
-                completion("探测失败：\(BridgeErrorText.describe(response.error))")
+                completion(AppLocalization.text("探测失败：\(BridgeErrorText.describe(response.error))", "Selector detection failed: \(BridgeErrorText.describe(response.error))"))
                 return
             }
             var lines: [String] = []
@@ -252,7 +353,7 @@ final class ChatWebController: NSObject {
     func dumpDOMCandidates(completion: @escaping (String) -> Void) {
         call("return window.\(BridgeScript.globalName).dump();") { response in
             guard response.isOK, let text = response.string("text") else {
-                completion("Dump 失败：\(BridgeErrorText.describe(response.error))")
+                completion(AppLocalization.text("Dump 失败：\(BridgeErrorText.describe(response.error))", "DOM dump failed: \(BridgeErrorText.describe(response.error))"))
                 return
             }
             completion(text)
@@ -436,7 +537,7 @@ extension ChatWebController: WKNavigationDelegate {
         case .openExternally:
             if let url = navigationAction.request.url {
                 NSWorkspace.shared.open(url)
-                Feedback.shared.toast("已在默认浏览器打开外部链接")
+                Feedback.shared.toast(AppLocalization.text("已在默认浏览器打开外部链接", "Opened the external link in the default browser"))
             }
             decisionHandler(.cancel)
         case .block:
@@ -488,7 +589,7 @@ extension ChatWebController: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         isPageReady = false
-        Feedback.shared.toast("网页进程已退出，正在重新加载", kind: .failure)
+        Feedback.shared.toast(AppLocalization.text("网页进程已退出，正在重新加载", "Web content process exited; reloading"), kind: .failure)
         loadHome()
     }
 
@@ -586,7 +687,7 @@ extension ChatWebController: WKUIDelegate {
         alert.messageText = "ChatGPT"
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: AppLocalization.text("取消", "Cancel"))
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
 
@@ -605,7 +706,7 @@ extension ChatWebController: WKUIDelegate {
         alert.informativeText = prompt
         alert.accessoryView = field
         alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: AppLocalization.text("取消", "Cancel"))
         completionHandler(alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
     }
 
@@ -645,11 +746,11 @@ extension ChatWebController: WKDownloadDelegate {
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        Feedback.shared.toast("下载完成：\(download.progress.fileURL?.lastPathComponent ?? "文件")")
+        Feedback.shared.toast(AppLocalization.text("下载完成：\(download.progress.fileURL?.lastPathComponent ?? "文件")", "Download finished: \(download.progress.fileURL?.lastPathComponent ?? "file")"))
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        Feedback.shared.toast("下载失败：\(error.localizedDescription)", kind: .failure)
+        Feedback.shared.toast(AppLocalization.text("下载失败：\(error.localizedDescription)", "Download failed: \(error.localizedDescription)"), kind: .failure)
     }
 }
 
@@ -670,7 +771,7 @@ private final class ErrorOverlayView: NSView {
         icon.symbolConfiguration = .init(pointSize: 32, weight: .regular)
         icon.contentTintColor = .secondaryLabelColor
 
-        let title = NSTextField(labelWithString: "页面加载失败")
+        let title = NSTextField(labelWithString: AppLocalization.text("页面加载失败", "Page failed to load"))
         title.font = .systemFont(ofSize: 15, weight: .semibold)
 
         let detail = NSTextField(wrappingLabelWithString: message)
@@ -679,7 +780,7 @@ private final class ErrorOverlayView: NSView {
         detail.alignment = .center
         detail.preferredMaxLayoutWidth = 320
 
-        let button = NSButton(title: "重新加载", target: self, action: #selector(handleRetry))
+        let button = NSButton(title: AppLocalization.text("重新加载", "Reload"), target: self, action: #selector(handleRetry))
         button.keyEquivalent = "\r"
 
         let stack = NSStackView(views: [icon, title, detail, button])

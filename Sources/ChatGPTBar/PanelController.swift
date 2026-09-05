@@ -100,6 +100,11 @@ final class PanelController: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
         }
         panel.makeKeyAndOrderFront(nil)
+        if pinned {
+            // A non-activating panel can lose ordering when another app owns
+            // focus; explicitly restoring it makes pinning deterministic.
+            panel.orderFrontRegardless()
+        }
         if let first = content.subviews.first {
             panel.makeFirstResponder(first)
         }
@@ -124,10 +129,19 @@ final class PanelController: NSObject, NSWindowDelegate {
         onPinChange?(value)
     }
 
+    func refreshLocalizedChrome() {
+        applyPinLevel()
+    }
+
     private func applyPinLevel() {
-        panel.isFloatingPanel = pinned
+        panel.isFloatingPanel = pinned || temporaryFloating
         panel.level = (pinned || temporaryFloating) ? .floating : .normal
-        panel.title = pinned ? "\(AppInfo.name) (Pinned)" : AppInfo.name
+        panel.title = pinned
+            ? AppLocalization.text("\(AppInfo.name)（已置顶）", "\(AppInfo.name) (Pinned)")
+            : AppInfo.name
+        if pinned && panel.isVisible {
+            panel.orderFrontRegardless()
+        }
     }
 
     private var temporaryFloating = false
@@ -161,6 +175,18 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) { scheduleFrameSave() }
     func windowDidResize(_ notification: Notification) { scheduleFrameSave() }
+    func windowDidBecomeKey(_ notification: Notification) { reapplyPinOrdering() }
+    func windowDidResignKey(_ notification: Notification) { reapplyPinOrdering() }
+
+    /// AppKit may re-evaluate a non-activating panel's ordering after focus
+    /// changes. Re-apply the invariant at the lifecycle boundary instead of
+    /// relying on the one-time toggle action.
+    private func reapplyPinOrdering() {
+        guard pinned, panel.isVisible else { return }
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.orderFrontRegardless()
+    }
 
     /// Closing the panel keeps the session alive; it only hides.
     func windowShouldClose(_ sender: NSWindow) -> Bool {

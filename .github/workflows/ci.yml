@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build
+        run: swift build
+
+      - name: Run pure logic self-tests
+        run: swift run SelfTest
+
+      - name: Build and package app
+        run: sh scripts/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChatGPTBar-macos-app
+          path: dist/ChatGPT Bar.app
+          retention-days: 3

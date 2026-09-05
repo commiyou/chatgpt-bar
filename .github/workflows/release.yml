@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, with or without the v prefix
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      should_release: ${{ steps.version.outputs.should_release }}
+      create_tag: ${{ steps.version.outputs.create_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          version="$INPUT_VERSION"
+          if [[ -z "$version" ]]; then
+            version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Support/Info.plist)"
+          fi
+          version="${version#v}"
+          tag="v${version}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            create_tag=false
+          else
+            create_tag=true
+          fi
+
+          should_release=true
+          if [[ "$create_tag" == false && "$EVENT_NAME" == "push" ]]; then
+            should_release=false
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
+          echo "create_tag=${create_tag}" >> "$GITHUB_OUTPUT"
+
+  build-and-release:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CREATE_TAG: ${{ needs.prepare.outputs.create_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run self-tests
+        run: swift run SelfTest
+
+      - name: Build and package architecture artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for arch in arm64 x86_64; do
+            ARCHS="$arch" APP_VERSION="$VERSION" sh scripts/build.sh
+            ditto -c -k --sequesterRsrc --keepParent "dist/ChatGPT Bar.app" "release/ChatGPTBar-macos-${arch}-${TAG}.zip"
+          done
+
+      - name: Package source archives
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix="ChatGPTBar-${VERSION}/" -o "release/ChatGPTBar-source-${TAG}.zip" HEAD
+          git archive --format=tar.gz --prefix="ChatGPTBar-${VERSION}/" -o "release/ChatGPTBar-source-${TAG}.tar.gz" HEAD
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for file in release/*; do
+            shasum -a 256 "$file" >> release/SHA256SUMS.txt
+          done
+          cat release/SHA256SUMS.txt
+
+      - name: Create tag
+        if: env.CREATE_TAG == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "ChatGPT Bar $TAG"
+          git push origin "$TAG"
+
+      - name: Create or update release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --title "ChatGPT Bar $TAG" \
+              --generate-notes \
+              --verify-tag
+          fi

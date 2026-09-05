@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        applyAppearance(settings.appearance)
+        AppLocalization.language = settings.language
 
         buildMainMenu()
         applyProxy(settings.proxy)
@@ -115,6 +117,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dumpDOM: { [weak self] completion in self?.webController.dumpDOMCandidates(completion: completion) },
             samplePerformance: { [weak self] seconds, completion in
                 self?.webController.samplePerformance(duration: seconds, completion: completion)
+            },
+            testURLScheme: { [weak self] url in
+                self?.application(NSApp, open: [url])
+            },
+            clearChatWebsiteData: { [weak self] completion in
+                guard let self else { return }
+                guard Feedback.shared.confirm(
+                    title: AppLocalization.text("清除 ChatGPT 网站数据", "Clear ChatGPT Website Data"),
+                    message: AppLocalization.text(
+                        "这会清除 ChatGPT/OpenAI 在 ChatGPT Bar 中的 Cookie、缓存和本地存储，可能需要重新登录；不会影响应用设置或 Chrome。",
+                        "This clears ChatGPT/OpenAI cookies, cache, and local storage in ChatGPT Bar. You may need to sign in again. App settings and Chrome are not affected."
+                    ),
+                    confirmTitle: AppLocalization.text("清除并重新加载", "Clear & Reload")
+                ) else {
+                    completion(AppLocalization.text("已取消清除网站数据。", "Website data clear cancelled."))
+                    return
+                }
+                self.webController.clearChatWebsiteData(completion: completion)
             }
         ))
 
@@ -158,12 +178,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if draft.nonActivating != previous.nonActivating {
             panelController.setNonActivating(draft.nonActivating)
         }
+        if draft.appearance != previous.appearance {
+            applyAppearance(draft.appearance)
+        }
+        if draft.language != previous.language {
+            AppLocalization.language = draft.language
+            panelController.refreshLocalizedChrome()
+        }
         if draft.proxy != previous.proxy {
             applyProxy(draft.proxy)
             if #available(macOS 14.0, *) {
                 webController.reload()
             } else if draft.proxy.enabled {
-                warnings.append("当前系统低于 macOS 14，代理设置不会生效。")
+                warnings.append(AppLocalization.text("当前系统低于 macOS 14，代理设置不会生效。", "On macOS below 14, proxy settings are not supported."))
             }
         }
         if draft.selectors != previous.selectors {
@@ -173,6 +200,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if draft.homeURL != previous.homeURL {
             webController.loadHome(draft.resolvedHomeURL)
+        }
+        if draft.copyLastResponseStrategy != previous.copyLastResponseStrategy {
+            webController.updateCopyLastResponseStrategy(draft.copyLastResponseStrategy)
         }
 
         updateLocalShortcuts()
@@ -214,6 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(proxy.host), port: port)
         WKWebsiteDataStore.default().proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: endpoint)]
+    }
+
+    private func applyAppearance(_ appearance: AppAppearance) {
+        switch appearance {
+        case .auto:
+            NSApp.appearance = nil
+        case .light:
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     @objc private func openSettings() {
@@ -280,12 +321,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 perform(try URLCommandParser.parse(url))
             } catch {
-                Feedback.shared.toast("URL 无法执行：\(error)", kind: .failure)
+                Feedback.shared.toast(AppLocalization.text("URL 无法执行：\(error)", "URL could not be executed: \(error)"), kind: .failure)
             }
         }
     }
 
     private func perform(_ command: URLCommand) {
+        guard settings.enabledURLCommands.contains(command.schemeCommand) else {
+            Feedback.shared.toast(
+                AppLocalization.text(
+                    "已禁用 URL 命令：\(command.schemeCommand.displayName)",
+                    "URL command disabled: \(command.schemeCommand.displayNameEnglish)"
+                ),
+                kind: .failure
+            )
+            return
+        }
         switch command {
         case .open:
             panelController.show()
@@ -310,9 +361,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if send, !settings.allowURLSchemeAutoSend {
             let preview = text.count > 300 ? String(text.prefix(300)) + "…" : text
             shouldSend = Feedback.shared.confirm(
-                title: "\(source) 请求直接发送",
-                message: "即将向 ChatGPT 发送以下内容：\n\n\(preview)",
-                confirmTitle: "发送"
+                title: AppLocalization.text("\(source) 请求直接发送", "\(source) requests immediate submission"),
+                message: AppLocalization.text("即将向 ChatGPT 发送以下内容：\n\n\(preview)", "The following content will be submitted to ChatGPT:\n\n\(preview)"),
+                confirmTitle: AppLocalization.text("发送", "Submit")
             )
         }
         webController.insert(text: text, mode: mode, submit: shouldSend)
@@ -326,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         error: AutoreleasingUnsafeMutablePointer<NSString?>?
     ) {
         guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
-            error?.pointee = "没有可用的文本" as NSString
+            error?.pointee = AppLocalization.text("没有可用的文本", "No text is available") as NSString
             return
         }
         DispatchQueue.main.async { [weak self] in
@@ -342,25 +393,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        appMenu.addItem(withTitle: AppLocalization.text("设置…", "Settings…"), action: #selector(openSettings), keyEquivalent: ",")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "重新加载", action: #selector(reloadPage), keyEquivalent: "r")
-        appMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowser), keyEquivalent: "o")
+        appMenu.addItem(withTitle: AppLocalization.text("重新加载", "Reload"), action: #selector(reloadPage), keyEquivalent: "r")
+        appMenu.addItem(withTitle: AppLocalization.text("在浏览器中打开", "Open in Browser"), action: #selector(openInBrowser), keyEquivalent: "o")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏面板", action: #selector(hidePanel), keyEquivalent: "w")
-        appMenu.addItem(withTitle: "退出 \(AppInfo.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: AppLocalization.text("隐藏面板", "Hide Panel"), action: #selector(hidePanel), keyEquivalent: "w")
+        appMenu.addItem(withTitle: AppLocalization.text("退出 \(AppInfo.name)", "Quit \(AppInfo.name)"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
 
         let editItem = NSMenuItem()
-        let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        let editMenu = NSMenu(title: AppLocalization.text("编辑", "Edit"))
+        editMenu.addItem(withTitle: AppLocalization.text("撤销", "Undo"), action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: AppLocalization.text("重做", "Redo"), action: Selector(("redo:")), keyEquivalent: "Z")
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(withTitle: AppLocalization.text("剪切", "Cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: AppLocalization.text("复制", "Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: AppLocalization.text("粘贴", "Paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: AppLocalization.text("全选", "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 

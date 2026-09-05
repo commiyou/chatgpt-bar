@@ -16,8 +16,31 @@ public struct ProxySettings: Codable, Equatable {
     }
 }
 
+public enum CopyLastResponseStrategy: String, Codable, CaseIterable, Equatable, Hashable {
+    case getLastResponse
+    case chatGPT
+
+    public var displayName: String {
+        switch self {
+        case .getLastResponse:
+            return "Markdown（getLastResponse）"
+        case .chatGPT:
+            return "GPT 原生 Copy"
+        }
+    }
+
+    public var displayNameEnglish: String {
+        switch self {
+        case .getLastResponse:
+            return "Markdown (getLastResponse)"
+        case .chatGPT:
+            return "ChatGPT native Copy"
+        }
+    }
+}
+
 public struct AppSettings: Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 5
 
     public var schemaVersion: Int
     public var homeURL: String
@@ -30,6 +53,7 @@ public struct AppSettings: Codable, Equatable {
     public var newChatShortcut: Shortcut?
     public var newTempChatShortcut: Shortcut?
     public var copyLastResponseShortcut: Shortcut?
+    public var copyLastResponseStrategy: CopyLastResponseStrategy
 
     public var selectors: SelectorSet
     public var proxy: ProxySettings
@@ -42,6 +66,13 @@ public struct AppSettings: Codable, Equatable {
     /// Off by default: any process or web page can open a URL scheme.
     public var allowURLSchemeAutoSend: Bool
 
+    /// URL commands are individually disableable. Missing values decode to
+    /// the full set so upgrading never silently disables an existing workflow.
+    public var enabledURLCommands: Set<URLSchemeCommand>
+
+    public var appearance: AppAppearance
+    public var language: AppLanguage
+
     public init(
         schemaVersion: Int = AppSettings.currentSchemaVersion,
         homeURL: String = "https://chatgpt.com",
@@ -53,10 +84,14 @@ public struct AppSettings: Codable, Equatable {
         newChatShortcut: Shortcut? = .defaultNewChat,
         newTempChatShortcut: Shortcut? = .defaultNewTempChat,
         copyLastResponseShortcut: Shortcut? = .defaultCopyLastResponse,
+        copyLastResponseStrategy: CopyLastResponseStrategy = .getLastResponse,
         selectors: SelectorSet = SelectorSet(),
         proxy: ProxySettings = ProxySettings(),
         longConversationOptimization: Bool = false,
-        allowURLSchemeAutoSend: Bool = false
+        allowURLSchemeAutoSend: Bool = false,
+        enabledURLCommands: Set<URLSchemeCommand> = Set(URLSchemeCommand.allCases),
+        appearance: AppAppearance = .auto,
+        language: AppLanguage = .system
     ) {
         self.schemaVersion = schemaVersion
         self.homeURL = homeURL
@@ -68,10 +103,14 @@ public struct AppSettings: Codable, Equatable {
         self.newChatShortcut = newChatShortcut
         self.newTempChatShortcut = newTempChatShortcut
         self.copyLastResponseShortcut = copyLastResponseShortcut
+        self.copyLastResponseStrategy = copyLastResponseStrategy
         self.selectors = selectors
         self.proxy = proxy
         self.longConversationOptimization = longConversationOptimization
         self.allowURLSchemeAutoSend = allowURLSchemeAutoSend
+        self.enabledURLCommands = enabledURLCommands
+        self.appearance = appearance
+        self.language = language
     }
 
     public var resolvedHomeURL: URL {
@@ -80,12 +119,15 @@ public struct AppSettings: Codable, Equatable {
 }
 
 extension AppSettings {
-    /// `longConversationOptimization` was added in schema 2; older payloads
-    /// simply decode to `false`.
+    /// `longConversationOptimization` was added in schema 2, URL command
+    /// permissions in schema 3, appearance/language in schema 4, and copy
+    /// strategy in schema 5. Older payloads use safe historical defaults.
     enum CodingKeys: String, CodingKey {
         case schemaVersion, homeURL, nonActivating, pinned, panelFrame
         case toggleShortcut, pinShortcut, newChatShortcut, newTempChatShortcut, copyLastResponseShortcut
-        case selectors, proxy, longConversationOptimization, allowURLSchemeAutoSend
+        case copyLastResponseStrategy
+        case selectors, proxy, longConversationOptimization, allowURLSchemeAutoSend, enabledURLCommands
+        case appearance, language
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,10 +144,15 @@ extension AppSettings {
             newChatShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .newChatShortcut),
             newTempChatShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .newTempChatShortcut),
             copyLastResponseShortcut: try container.decodeIfPresent(Shortcut.self, forKey: .copyLastResponseShortcut),
+            copyLastResponseStrategy: try container.decodeIfPresent(CopyLastResponseStrategy.self, forKey: .copyLastResponseStrategy) ?? .getLastResponse,
             selectors: try container.decodeIfPresent(SelectorSet.self, forKey: .selectors) ?? SelectorSet(),
             proxy: try container.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings(),
             longConversationOptimization: try container.decodeIfPresent(Bool.self, forKey: .longConversationOptimization) ?? false,
-            allowURLSchemeAutoSend: try container.decodeIfPresent(Bool.self, forKey: .allowURLSchemeAutoSend) ?? false
+            allowURLSchemeAutoSend: try container.decodeIfPresent(Bool.self, forKey: .allowURLSchemeAutoSend) ?? false,
+            enabledURLCommands: try container.decodeIfPresent(Set<URLSchemeCommand>.self, forKey: .enabledURLCommands)
+                ?? Set(URLSchemeCommand.allCases),
+            appearance: try container.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? .auto,
+            language: try container.decodeIfPresent(AppLanguage.self, forKey: .language) ?? .system
         )
     }
 
@@ -121,10 +168,14 @@ extension AppSettings {
         try container.encodeIfPresent(newChatShortcut, forKey: .newChatShortcut)
         try container.encodeIfPresent(newTempChatShortcut, forKey: .newTempChatShortcut)
         try container.encodeIfPresent(copyLastResponseShortcut, forKey: .copyLastResponseShortcut)
+        try container.encode(copyLastResponseStrategy, forKey: .copyLastResponseStrategy)
         try container.encode(selectors, forKey: .selectors)
         try container.encode(proxy, forKey: .proxy)
         try container.encode(longConversationOptimization, forKey: .longConversationOptimization)
         try container.encode(allowURLSchemeAutoSend, forKey: .allowURLSchemeAutoSend)
+        try container.encode(enabledURLCommands, forKey: .enabledURLCommands)
+        try container.encode(appearance, forKey: .appearance)
+        try container.encode(language, forKey: .language)
     }
 }
 

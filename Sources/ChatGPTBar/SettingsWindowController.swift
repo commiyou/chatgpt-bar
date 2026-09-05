@@ -16,6 +16,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         var probeSelectors: (@escaping (String) -> Void) -> Void
         var dumpDOM: (@escaping (String) -> Void) -> Void
         var samplePerformance: (TimeInterval, @escaping ([String: Any]) -> Void) -> Void
+        var testURLScheme: (URL) -> Void
+        var clearChatWebsiteData: (@escaping (String) -> Void) -> Void
     }
 
     private let environment: Environment
@@ -34,6 +36,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     func show(tab: SettingsTab) {
         let window = self.window ?? build(tab: tab)
         model?.reload()
+        window.appearance = NSApp.appearance
+        window.title = AppLocalization.text("\(AppInfo.name) 设置", "\(AppInfo.name) Settings")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
@@ -48,7 +52,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         )
         model.onClose = { [weak window] in window?.orderOut(nil) }
 
-        window.title = "\(AppInfo.name) 设置"
+        window.title = AppLocalization.text("\(AppInfo.name) 设置", "\(AppInfo.name) Settings")
         window.contentView = NSHostingView(rootView: SettingsView(model: model, initialTab: tab))
         window.isReleasedWhenClosed = false
         window.delegate = self
