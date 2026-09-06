@@ -119,7 +119,20 @@ BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
 "$BIN" --force-optimization 0|1
 ```
 
-报告包含文档提交、UI load、首条回复出现时间、滚动期间长帧统计和选择器命中情况。
+报告包含文档提交、首个 turn、内容稳定时间、会话内部滚动容器尺寸、
+资源数量、可选 Long Tasks 数据、滚动采样是否有效以及选择器命中情况。
+如果 WebView 处于 hidden 状态，报告会写
+`jank.supported=false`，不会把没有采到动画帧误报为零卡顿。
+
+当长会话渲染优化关闭时，页面选择器保存会通过 bridge 更新当前页面，
+不会自动触发整页 reload；渲染优化开关变化仍会 reload，因为它依赖
+document-start CSS。
+
+构建后可运行本地 WebKit smoke test：
+
+```sh
+scripts/test-webkit-diagnostics.sh
+```
 
 ## 开发
 
@@ -127,6 +140,7 @@ BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
 swift build
 swift run SelfTest
 sh scripts/build.sh
+sh scripts/test-all.sh
 
 # 构建指定架构
 ARCHS=x86_64 sh scripts/build.sh

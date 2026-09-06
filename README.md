@@ -123,7 +123,21 @@ BIN="dist/ChatGPT Bar.app/Contents/MacOS/ChatGPTBar"
 "$BIN" --force-optimization 0|1
 ```
 
-Reports include document commit time, UI load time, first turn visibility, scroll jank, and selector results.
+Reports include document commit time, first-turn and stable-content timing,
+conversation scroller dimensions, resource counts, optional Long Tasks data,
+scroll sampling support, and selector results. A hidden WebView reports
+`jank.supported=false` instead of treating missing animation frames as zero
+jank.
+
+When long-conversation rendering optimization is disabled, saving selector
+changes updates the current bridge without reloading the page. Changing the
+rendering optimization still reloads because it depends on document-start CSS.
+
+Run the local WebKit smoke test after building:
+
+```sh
+scripts/test-webkit-diagnostics.sh
+```
 
 ## Development
 
@@ -131,6 +145,7 @@ Reports include document commit time, UI load time, first turn visibility, scrol
 swift build
 swift run SelfTest
 sh scripts/build.sh
+sh scripts/test-all.sh
 
 # Build a specific architecture
 ARCHS=x86_64 sh scripts/build.sh

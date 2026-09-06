@@ -144,12 +144,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
 
+        // Put the panel on screen before navigation starts so the user gets
+        // immediate visual feedback and WebKit can render in a visible view.
+        panelController.show()
         if let url = launchOptions.url {
             webController.load(url: url)
         } else {
             webController.loadHome(settings.resolvedHomeURL)
         }
-        panelController.show()
 
         if launchOptions.openSettings {
             settingsController.show(tab: launchOptions.settingsTab)
@@ -193,9 +195,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 warnings.append(AppLocalization.text("当前系统低于 macOS 14，代理设置不会生效。", "On macOS below 14, proxy settings are not supported."))
             }
         }
-        if draft.selectors != previous.selectors {
-            webController.rebuildScripts(settings: draft)
-        } else if draft.longConversationOptimization != previous.longConversationOptimization {
+        if draft.selectors != previous.selectors,
+           draft.longConversationOptimization == previous.longConversationOptimization,
+           !draft.longConversationOptimization {
+            webController.updateSelectors(settings: draft)
+        } else if draft.selectors != previous.selectors
+                    || draft.longConversationOptimization != previous.longConversationOptimization {
             webController.rebuildScripts(settings: draft)
         }
         if draft.homeURL != previous.homeURL {

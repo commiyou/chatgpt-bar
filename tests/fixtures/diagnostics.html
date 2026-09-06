@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Bar diagnostics fixture</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    #conversation {
+      box-sizing: border-box;
+      height: 100%;
+      overflow-y: auto;
+      padding: 24px;
+    }
+
+    [data-testid^="conversation-turn"] {
+      min-height: 180px;
+      margin-bottom: 16px;
+      border: 1px solid #ccc;
+    }
+
+    pre {
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main id="conversation">
+    <form>
+      <div id="prompt-textarea" contenteditable="true"></div>
+    </form>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const streaming = params.get("streaming") === "1";
+    setTimeout(() => {
+      const conversation = document.querySelector("#conversation");
+      for (let index = 0; index < 40; index += 1) {
+        const turn = document.createElement("section");
+        turn.dataset.testid = `conversation-turn-${index}`;
+        turn.innerHTML = `
+          <div data-message-author-role="${index % 2 === 0 ? "assistant" : "user"}">
+            <p>Fixture turn ${index}</p>
+            <pre><code class="language-js">console.log(${index});</code></pre>
+          </div>
+        `;
+        conversation.appendChild(turn);
+      }
+      if (streaming) {
+        let tick = 0;
+        const timer = setInterval(() => {
+          const last = conversation.lastElementChild;
+          const paragraph = last && last.querySelector("p");
+          if (!paragraph) return;
+          paragraph.textContent = `Fixture streaming turn ${tick}`;
+          tick += 1;
+          if (tick >= 20) clearInterval(timer);
+        }, 100);
+      }
+    }, 300);
+  </script>
+</body>
+</html>

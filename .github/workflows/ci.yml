@@ -17,14 +17,8 @@ jobs:
           swift --version
           xcodebuild -version
 
-      - name: Build
-        run: swift build
-
-      - name: Run pure logic self-tests
-        run: swift run SelfTest
-
-      - name: Build and package app
-        run: sh scripts/build.sh
+      - name: Run automated test suite
+        run: sh scripts/test-all.sh
 
       - uses: actions/upload-artifact@v4
         with:

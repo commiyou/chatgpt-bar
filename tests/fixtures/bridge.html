@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Bridge fixture</title></head>
+<body>
+  <section data-message-author-role="assistant">
+    <p>Rendered <strong>response</strong>.</p>
+    <table>
+      <thead><tr><th>Feature</th><th>Value</th></tr></thead>
+      <tbody><tr><td>Table</td><td>Markdown</td></tr></tbody>
+    </table>
+    <p><span role="math" data-math-source="x^2 + y^2"></span></p>
+    <pre><code class="language-swift">let answer = 42</code></pre>
+    <button aria-label="Copy" id="code-copy" type="button" onclick="window.clickedCopy = 'code'">Copy</button>
+    <button aria-label="Copy response" id="response-copy" type="button" onclick="window.clickedCopy = 'response'">Copy response</button>
+  </section>
+  <form><div id="prompt-textarea" contenteditable="true"></div></form>
+</body>
+</html>

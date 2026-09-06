@@ -11,6 +11,8 @@ let package = Package(
         .executableTarget(name: "ChatGPTBar", dependencies: ["ChatGPTBarKit"]),
         // XCTest is unavailable on Command Line Tools only installs, so the
         // checks run as a normal executable: `swift run SelfTest`.
-        .executableTarget(name: "SelfTest", dependencies: ["ChatGPTBarKit"])
+        .executableTarget(name: "SelfTest", dependencies: ["ChatGPTBarKit"]),
+        // Emits the deterministic bridge source for browser fixture tests.
+        .executableTarget(name: "BridgeDump", dependencies: ["ChatGPTBarKit"])
     ]
 )

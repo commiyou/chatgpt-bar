@@ -17,6 +17,8 @@ public enum BridgeScript {
           if (window.\(globalName)) { return; }
           var SELECTORS = \(json);
           var DEFAULT_TIMEOUT = 8000;
+          var mutationObserver = null;
+          var mutationWaiters = [];
 
           function list(key) { return SELECTORS[key] || []; }
           function firstMatch(key, predicate) {
@@ -40,14 +42,52 @@ public enum BridgeScript {
             return null;
           }
           function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
-          async function waitFor(key, timeout, predicate) {
-            var deadline = Date.now() + (timeout || DEFAULT_TIMEOUT);
-            for (;;) {
-              var hit = firstMatch(key, predicate);
-              if (hit) { return hit; }
-              if (Date.now() >= deadline) { return null; }
-              await sleep(100);
+          function stopMutationObserverIfIdle() {
+            if (mutationObserver && mutationWaiters.length === 0) {
+              mutationObserver.disconnect();
+              mutationObserver = null;
             }
+          }
+          function ensureMutationObserver() {
+            if (mutationObserver || !window.MutationObserver) { return; }
+            mutationObserver = new MutationObserver(function () {
+              var waiters = mutationWaiters.slice();
+              waiters.forEach(function (waiter) { waiter(); });
+            });
+            mutationObserver.observe(document.documentElement || document, {
+              subtree: true,
+              childList: true,
+              characterData: true,
+              attributes: true,
+              attributeFilter: ['aria-label', 'data-testid', 'data-message-author-role', 'disabled', 'aria-disabled']
+            });
+          }
+          async function waitFor(key, timeout, predicate) {
+            ensureMutationObserver();
+            return await new Promise(function (resolve) {
+              var done = false;
+              var deadline = Date.now() + (timeout || DEFAULT_TIMEOUT);
+              var waiter = function () {
+                if (done) { return; }
+                var hit = firstMatch(key, predicate);
+                if (hit) {
+                  done = true;
+                  mutationWaiters = mutationWaiters.filter(function (item) { return item !== waiter; });
+                  clearTimeout(timer);
+                  stopMutationObserverIfIdle();
+                  resolve(hit);
+                }
+              };
+              var timer = setTimeout(function () {
+                if (done) { return; }
+                done = true;
+                mutationWaiters = mutationWaiters.filter(function (item) { return item !== waiter; });
+                stopMutationObserverIfIdle();
+                resolve(null);
+              }, Math.max(0, deadline - Date.now()));
+              mutationWaiters.push(waiter);
+              waiter();
+            });
           }
           function ok(value) { return { ok: true, value: value === undefined ? null : value }; }
           function fail(code, detail) { return { ok: false, error: code, detail: detail === undefined ? null : detail }; }
@@ -294,9 +334,30 @@ public enum BridgeScript {
             }
             return null;
           }
-          // Frame-time sampler. WebKit has no Long Tasks API, so jank is
-          // measured as requestAnimationFrame gaps. Only runs while sampling.
+          // Frame-time sampler. Long Tasks is not available in every WebKit
+          // version, so keep an rAF fallback. The public perfRun method keeps
+          // the sampler and scroll loop in one JS task boundary.
           var perf = null;
+          var longTaskState = { supported: false, count: 0, totalMs: 0, maxMs: 0 };
+          var resourceState = { count: -1, transfer: 0, duration: 0 };
+          try {
+            var supportedTypes = (window.PerformanceObserver && PerformanceObserver.supportedEntryTypes) || [];
+            longTaskState.supported = supportedTypes.indexOf('longtask') >= 0;
+            if (longTaskState.supported) {
+              var longTaskObserver = new PerformanceObserver(function (list) {
+                list.getEntries().forEach(function (entry) {
+                  var duration = Number(entry.duration) || 0;
+                  longTaskState.count++;
+                  longTaskState.totalMs += duration;
+                  if (duration > longTaskState.maxMs) { longTaskState.maxMs = duration; }
+                });
+              });
+              longTaskObserver.observe({ entryTypes: ['longtask'] });
+            }
+          } catch (e) {
+            longTaskState.supported = false;
+          }
+
           function perfReset() {
             perf = { on: false, frames: 0, longFrames: 0, maxFrame: 0, blocking: 0, last: 0, startedAt: 0 };
           }
@@ -313,10 +374,27 @@ public enum BridgeScript {
             requestAnimationFrame(perfTick);
           }
 
+          function perfResult() {
+            return {
+              supported: perf.frames > 0,
+              visibilityState: document.visibilityState || null,
+              durationMs: Math.round(performance.now() - perf.startedAt),
+              frames: perf.frames,
+              longFrames: perf.longFrames,
+              maxFrameMs: Math.round(perf.maxFrame),
+              blockingMs: Math.round(perf.blocking)
+            };
+          }
+
           // The conversation scroller is an inner element, not the document, and
           // its ancestors are not reliably marked, so pick the tallest element
           // that actually scrolls.
+          var cachedScroller = null;
           function findScroller() {
+            if (cachedScroller && cachedScroller.isConnected
+                && cachedScroller.scrollHeight > cachedScroller.clientHeight + 40) {
+              return cachedScroller;
+            }
             var best = null;
             var fallback = null;
             var nodes = document.querySelectorAll('div, main, section, article');
@@ -330,15 +408,106 @@ public enum BridgeScript {
               if (overflow !== 'auto' && overflow !== 'scroll' && overflow !== 'overlay') { continue; }
               if (!best || el.clientHeight > best.clientHeight) { best = el; }
             }
-            if (best) { return best; }
-            if (fallback) { return fallback; }
+            if (best) {
+              cachedScroller = best;
+              return best;
+            }
+            if (fallback) {
+              cachedScroller = fallback;
+              return fallback;
+            }
             var root = document.scrollingElement || document.body;
+            cachedScroller = root;
             return root;
+          }
+
+          function contentSnapshot() {
+            var turns = allMatches('turn');
+            var assistants = allMatches('assistant');
+            var lastAssistant = assistants && assistants.nodes.length
+              ? assistants.nodes[assistants.nodes.length - 1] : null;
+            var scroller = findScroller();
+            var isConversation = !!(turns || assistants)
+              || /\\/c\\//.test(location.pathname || '');
+            return {
+              isConversation: isConversation,
+              turns: turns ? turns.nodes.length : 0,
+              assistants: assistants ? assistants.nodes.length : 0,
+              scrollHeight: scroller ? scroller.scrollHeight : 0,
+              lastTextLength: lastAssistant ? (lastAssistant.textContent || '').length : 0,
+              codeBlocks: document.querySelectorAll('pre').length
+            };
+          }
+
+          async function waitForContentStableInternal(timeoutMs, quietMs) {
+            ensureMutationObserver();
+            return await new Promise(function (resolve) {
+              var started = performance.now();
+              var timeout = timeoutMs || 15000;
+              var quiet = quietMs || 500;
+              var settled = false;
+              var quietTimer = null;
+              var deadlineTimer = null;
+              var previous = null;
+              function finish(snapshot, stable) {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(quietTimer);
+                clearTimeout(deadlineTimer);
+                mutationWaiters = mutationWaiters.filter(function (item) { return item !== check; });
+                stopMutationObserverIfIdle();
+                resolve({
+                  stable: stable,
+                  elapsedMs: Math.round(performance.now() - started),
+                  turns: snapshot.turns,
+                  assistants: snapshot.assistants,
+                  scrollHeight: snapshot.scrollHeight
+                });
+              }
+              function armQuietTimer(snapshot) {
+                clearTimeout(quietTimer);
+                quietTimer = setTimeout(function () {
+                  var latest = contentSnapshot();
+                  var same = JSON.stringify(latest) === JSON.stringify(snapshot);
+                  finish(latest, same);
+                }, quiet);
+              }
+              function check() {
+                if (settled) { return; }
+                var snapshot = contentSnapshot();
+                if (!snapshot.isConversation) {
+                  finish(snapshot, true);
+                  return;
+                }
+                if (snapshot.turns > 0 || snapshot.assistants > 0) {
+                  if (!previous || JSON.stringify(previous) !== JSON.stringify(snapshot)) {
+                    previous = snapshot;
+                    armQuietTimer(snapshot);
+                  }
+                }
+              }
+              deadlineTimer = setTimeout(function () {
+                finish(contentSnapshot(), false);
+              }, timeout);
+              mutationWaiters.push(check);
+              check();
+            });
           }
 
           window.\(globalName) = {
             version: \(version),
             selectors: SELECTORS,
+
+            configure(nextSelectors) {
+              if (!nextSelectors || typeof nextSelectors !== 'object') {
+                return fail('invalid_selectors');
+              }
+              Object.keys(nextSelectors).forEach(function (key) {
+                if (Array.isArray(nextSelectors[key])) { SELECTORS[key] = nextSelectors[key].slice(); }
+              });
+              cachedScroller = null;
+              return ok({ configured: true, selectors: SELECTORS });
+            },
 
             async ready(timeout) {
               var hit = await waitFor('editor', timeout);
@@ -411,6 +580,10 @@ public enum BridgeScript {
               return ok({ selector: hit.selector, strategy: 'chatgpt-copy-button' });
             },
 
+            waitForContentStable(timeoutMs, quietMs) {
+              return waitForContentStableInternal(timeoutMs, quietMs).then(ok);
+            },
+
             newChat() {
               var hit = firstMatch('newChat');
               if (hit) {
@@ -456,19 +629,19 @@ public enum BridgeScript {
             perfStop() {
               if (!perf.on) { return fail('perf_not_running'); }
               perf.on = false;
-              return ok({
-                durationMs: Math.round(performance.now() - perf.startedAt),
-                frames: perf.frames,
-                longFrames: perf.longFrames,
-                maxFrameMs: Math.round(perf.maxFrame),
-                blockingMs: Math.round(perf.blocking)
-              });
+              return ok(perfResult());
             },
 
-            /// Deterministic scroll sweep so jank numbers are comparable.
-            async scrollBench(durationMs) {
+            /// Runs frame sampling and a deterministic scroll sweep in one
+            /// async invocation so WebKit cannot suspend the rAF loop between
+            /// separate bridge calls.
+            async perfRun(durationMs) {
               var scroller = findScroller();
               if (!scroller) { return fail('scroller_not_found'); }
+              perfReset();
+              perf.on = true;
+              perf.startedAt = performance.now();
+              requestAnimationFrame(perfTick);
               var started = performance.now();
               var direction = 1;
               var steps = 0;
@@ -479,7 +652,9 @@ public enum BridgeScript {
                 if (scroller.scrollTop <= 0) { direction = 1; }
                 await sleep(32);
               }
+              perf.on = false;
               return ok({
+                sample: perfResult(),
                 steps: steps,
                 scrollHeight: scroller.scrollHeight,
                 clientHeight: scroller.clientHeight,
@@ -488,20 +663,67 @@ public enum BridgeScript {
               });
             },
 
+            // Compatibility alias for callers that only want the scroll result.
+            async scrollBench(durationMs) {
+              var result = await this.perfRun(durationMs);
+              if (!result.ok) { return result; }
+              return ok({
+                steps: result.value.steps,
+                scrollHeight: result.value.scrollHeight,
+                clientHeight: result.value.clientHeight,
+                tag: result.value.tag,
+                scrollable: result.value.scrollable
+              });
+            },
+
             metrics() {
               var turns = allMatches('turn');
               var assistants = allMatches('assistant');
               var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || null;
               var firstTurn = (turns && turns.nodes.length) ? turns.nodes[0] : null;
+              var scroller = findScroller();
+              var isConversation = !!(turns || assistants)
+                || /\\/c\\//.test(location.pathname || '');
+              var resources = (performance.getEntriesByType && performance.getEntriesByType('resource')) || [];
+              if (resources.length !== resourceState.count) {
+                resourceState.count = resources.length;
+                resourceState.transfer = 0;
+                resourceState.duration = 0;
+                for (var resourceIndex = 0; resourceIndex < resources.length; resourceIndex++) {
+                  resourceState.transfer += Number(resources[resourceIndex].transferSize) || 0;
+                  resourceState.duration = Math.max(resourceState.duration, Number(resources[resourceIndex].duration) || 0);
+                }
+              }
               return ok({
                 url: location.href,
+                contentState: isConversation
+                  ? ((turns && turns.nodes.length) || (assistants && assistants.nodes.length)
+                    ? 'conversation'
+                    : 'conversation_loading')
+                  : 'home',
+                isConversation: isConversation,
                 domNodes: document.getElementsByTagName('*').length,
                 turns: turns ? turns.nodes.length : 0,
                 turnSelector: turns ? turns.selector : null,
                 assistantNodes: assistants ? assistants.nodes.length : 0,
                 codeBlocks: document.querySelectorAll('pre').length,
                 images: document.querySelectorAll('img').length,
-                scrollHeight: document.documentElement.scrollHeight,
+                documentScrollHeight: document.documentElement.scrollHeight,
+                conversationScroller: scroller ? {
+                  tag: scroller.tagName.toLowerCase(),
+                  scrollHeight: scroller.scrollHeight,
+                  clientHeight: scroller.clientHeight,
+                  scrollable: scroller.scrollHeight > scroller.clientHeight + 40
+                } : null,
+                resourceCount: resources.length,
+                resourceTransferSizeKB: resourceState.transfer ? Math.round(resourceState.transfer / 1024) : 0,
+                slowestResourceMs: resourceState.duration ? Math.round(resourceState.duration) : 0,
+                longTasks: {
+                  supported: longTaskState.supported,
+                  count: longTaskState.count,
+                  totalMs: Math.round(longTaskState.totalMs),
+                  maxMs: Math.round(longTaskState.maxMs)
+                },
                 turnContentVisibility: firstTurn ? getComputedStyle(firstTurn).contentVisibility : null,
                 domContentLoadedMs: nav ? Math.round(nav.domContentLoadedEventEnd) : null,
                 loadEventMs: nav ? Math.round(nav.loadEventEnd) : null,
@@ -620,6 +842,12 @@ public struct BridgeResponse {
 
     public func string(_ key: String) -> String? { value?[key] as? String }
     public func bool(_ key: String) -> Bool? { value?[key] as? Bool }
+    public func number(_ key: String) -> Double? {
+        if let value = value?[key] as? NSNumber { return value.doubleValue }
+        if let value = value?[key] as? Double { return value }
+        if let value = value?[key] as? Int { return Double(value) }
+        return nil
+    }
     public func array(_ key: String) -> [[String: Any]]? { value?[key] as? [[String: Any]] }
 }
 

@@ -15,6 +15,8 @@ final class ChatWebController: NSObject {
     private var policy: NavigationPolicy
     private var popups: [PopupWindowController] = []
     private var errorOverlay: ErrorOverlayView?
+    private var loadingOverlay: LoadingOverlayView?
+    private var scheduledReload: DispatchWorkItem?
 
     private var pending: [() -> Void] = []
     private let pendingLimit = 16
@@ -74,24 +76,21 @@ final class ChatWebController: NSObject {
     // MARK: - Loading
 
     func loadHome(_ url: URL? = nil) {
+        scheduledReload?.cancel()
+        scheduledReload = nil
         if let url {
             homeURL = url
             policy = ChatWebController.makePolicy(homeURL: url)
         }
         hideErrorOverlay()
+        showLoadingOverlay()
         lastRequestedURL = homeURL
         webView.load(URLRequest(url: homeURL))
     }
 
     func reload() {
         hideErrorOverlay()
-        if webView.url != nil {
-            webView.reload()
-        } else if let last = lastRequestedURL {
-            webView.load(URLRequest(url: last))
-        } else {
-            loadHome()
-        }
+        scheduleReload()
     }
 
     /// Clears only ChatGPT/OpenAI website data owned by this WKWebView store.
@@ -128,10 +127,13 @@ final class ChatWebController: NSObject {
 
     /// Loads an arbitrary page (diagnostics); keeps the configured home intact.
     func load(url: URL) {
+        scheduledReload?.cancel()
+        scheduledReload = nil
         if let host = url.host, !policy.isAllowedHost(host) {
             policy = NavigationPolicy(allowedHostSuffixes: policy.allowedHostSuffixes + [host])
         }
         hideErrorOverlay()
+        showLoadingOverlay()
         isPageReady = false
         lastRequestedURL = url
         webView.load(URLRequest(url: url))
@@ -141,7 +143,22 @@ final class ChatWebController: NSObject {
     func rebuildScripts(settings: AppSettings) {
         installScripts(settings: settings)
         isPageReady = false
-        webView.reload()
+        showLoadingOverlay()
+        scheduleReload()
+    }
+
+    /// Updates selectors in the existing page without a navigation. The
+    /// document-start script remains the source of truth for a fresh load.
+    func updateSelectors(settings: AppSettings, completion: ((Bool) -> Void)? = nil) {
+        call(
+            "return window.\(BridgeScript.globalName).configure(nextSelectors);",
+            arguments: ["nextSelectors": settings.selectors.resolvedJSONObject]
+        ) { [weak self] response in
+            if !response.isOK {
+                self?.rebuildScripts(settings: settings)
+            }
+            completion?(response.isOK)
+        }
     }
 
     private func installScripts(settings: AppSettings) {
@@ -161,6 +178,27 @@ final class ChatWebController: NSObject {
                 forMainFrameOnly: true
             )
         )
+    }
+
+    /// Coalesce reloads requested by several settings changes in one apply
+    /// pass. User-triggered navigations cancel this deferred work.
+    private func scheduleReload() {
+        isPageReady = false
+        showLoadingOverlay()
+        scheduledReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.scheduledReload = nil
+            if self.webView.url != nil {
+                self.webView.reload()
+            } else if let last = self.lastRequestedURL {
+                self.webView.load(URLRequest(url: last))
+            } else {
+                self.loadHome()
+            }
+        }
+        scheduledReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
     }
 
     // MARK: - Bridge plumbing
@@ -396,28 +434,22 @@ final class ChatWebController: NSObject {
     /// Samples frame gaps during a deterministic scroll sweep, then reports
     /// jank plus page metrics.
     func samplePerformance(duration: TimeInterval, completion: @escaping ([String: Any]) -> Void) {
-        call("return window.\(BridgeScript.globalName).perfStart();") { [weak self] started in
+        call(
+            "return await window.\(BridgeScript.globalName).perfRun(durationMs);",
+            arguments: ["durationMs": Int(duration * 1000)]
+        ) { [weak self] scrolled in
             guard let self else { return }
-            guard started.isOK else {
-                completion(["error": BridgeErrorText.describe(started.error)])
-                return
-            }
-            self.call(
-                "return await window.\(BridgeScript.globalName).scrollBench(durationMs);",
-                arguments: ["durationMs": Int(duration * 1000)]
-            ) { scrolled in
-                self.call("return window.\(BridgeScript.globalName).perfStop();") { stopped in
-                    self.metrics { metrics in
-                        var result: [String: Any] = [:]
-                        result["jank"] = stopped.value ?? ["error": BridgeErrorText.describe(stopped.error)]
-                        result["page"] = metrics.value ?? ["error": BridgeErrorText.describe(metrics.error)]
-                        result["scroll"] = scrolled.value ?? ["error": BridgeErrorText.describe(scrolled.error)]
-                        if let seconds = self.lastLoadSeconds {
-                            result["uiLoadSeconds"] = (seconds * 1000).rounded() / 1000
-                        }
-                        completion(result)
-                    }
+            self.metrics { metrics in
+                var result: [String: Any] = [:]
+                let scrollValue = scrolled.value ?? [:]
+                result["jank"] = (scrollValue["sample"] as? [String: Any])
+                    ?? ["supported": false, "reason": BridgeErrorText.describe(scrolled.error)]
+                result["page"] = metrics.value ?? ["error": BridgeErrorText.describe(metrics.error)]
+                result["scroll"] = scrollValue
+                if let seconds = self.lastLoadSeconds {
+                    result["uiLoadSeconds"] = (seconds * 1000).rounded() / 1000
                 }
+                completion(result)
             }
         }
     }
@@ -440,24 +472,34 @@ final class ChatWebController: NSObject {
                 completion(["error": "document was not committed within 90s"])
                 return
             }
-            self.waitForTurns(deadline: Date().addingTimeInterval(90)) { turns in
+            self.waitForTurns(deadline: Date().addingTimeInterval(30)) { turns in
                 let timeToTurns = CFAbsoluteTimeGetCurrent() - startedAt
-                self.samplePerformance(duration: settle) { sample in
-                    var report = sample
-                    report["timeToFirstTurnSeconds"] = (timeToTurns * 1000).rounded() / 1000
-                    report["turnsWhenRendered"] = turns
-                    if let commit = self.lastCommitSeconds {
-                        report["documentCommitSeconds"] = (commit * 1000).rounded() / 1000
-                    }
-                    guard includeProbes else {
-                        completion(report)
-                        return
-                    }
-                    self.probeSelectors { probe in
-                        self.dumpDOMCandidates { dump in
-                            report["selectorProbe"] = probe
-                            report["domCandidates"] = dump
+                self.waitForStableContent(
+                    deadline: Date().addingTimeInterval(15)
+                ) { stableTurns, stableSeconds, isStable in
+                    self.samplePerformance(duration: settle) { sample in
+                        var report = sample
+                        report["timeToFirstTurnSeconds"] = (timeToTurns * 1000).rounded() / 1000
+                        report["turnsWhenRendered"] = turns
+                        report["turnsWhenStable"] = stableTurns
+                        report["contentStable"] = isStable
+                        report["contentStabilityTimedOut"] = !isStable
+                        if isStable {
+                            report["timeToStableContentSeconds"] = ((timeToTurns + stableSeconds) * 1000).rounded() / 1000
+                        }
+                        if let commit = self.lastCommitSeconds {
+                            report["documentCommitSeconds"] = (commit * 1000).rounded() / 1000
+                        }
+                        guard includeProbes else {
                             completion(report)
+                            return
+                        }
+                        self.probeSelectors { probe in
+                            self.dumpDOMCandidates { dump in
+                                report["selectorProbe"] = probe
+                                report["domCandidates"] = dump
+                                completion(report)
+                            }
                         }
                     }
                 }
@@ -467,14 +509,40 @@ final class ChatWebController: NSObject {
 
     private func waitForTurns(deadline: Date, completion: @escaping (Int) -> Void) {
         metrics { [weak self] response in
+            guard let self else { return }
+            let isConversation = response.bool("isConversation") ?? false
+            if !isConversation {
+                completion(0)
+                return
+            }
             let turns = (response.value?["turns"] as? Int) ?? 0
             if turns > 0 || Date() >= deadline {
                 completion(turns)
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                self?.waitForTurns(deadline: deadline, completion: completion)
+                self.waitForTurns(deadline: deadline, completion: completion)
             }
+        }
+    }
+
+    private func waitForStableContent(
+        deadline: Date,
+        completion: @escaping (Int, TimeInterval, Bool) -> Void
+    ) {
+        let timeoutMs = max(1, Int(deadline.timeIntervalSinceNow * 1000))
+        let quietMs = 500
+        call(
+            "return await window.\(BridgeScript.globalName).waitForContentStable(timeoutMs, quietMs);",
+            arguments: ["timeoutMs": timeoutMs, "quietMs": quietMs]
+        ) { response in
+            guard response.isOK else {
+                completion(0, 0, false)
+                return
+            }
+            let turns = response.number("turns").map(Int.init) ?? 0
+            let elapsed = (response.number("elapsedMs") ?? 0) / 1000
+            completion(turns, elapsed, response.bool("stable") ?? false)
         }
     }
 
@@ -501,6 +569,7 @@ final class ChatWebController: NSObject {
     // MARK: - Error overlay
 
     private func showErrorOverlay(message: String) {
+        hideLoadingOverlay()
         hideErrorOverlay()
         let overlay = ErrorOverlayView(message: message) { [weak self] in
             self?.reload()
@@ -519,6 +588,30 @@ final class ChatWebController: NSObject {
     private func hideErrorOverlay() {
         errorOverlay?.removeFromSuperview()
         errorOverlay = nil
+    }
+
+    private func showLoadingOverlay() {
+        if let loadingOverlay {
+            loadingOverlay.startAnimating()
+            return
+        }
+        let overlay = LoadingOverlayView()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        containerView.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: containerView.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+        ])
+        overlay.startAnimating()
+        loadingOverlay = overlay
+    }
+
+    private func hideLoadingOverlay() {
+        loadingOverlay?.stopAnimating()
+        loadingOverlay?.removeFromSuperview()
+        loadingOverlay = nil
     }
 }
 
@@ -557,11 +650,13 @@ extension ChatWebController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isPageReady = false
         navigationStartedAt = CFAbsoluteTimeGetCurrent()
+        showLoadingOverlay()
     }
 
     /// The document exists from here on, so the injected bridge is live.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         hideErrorOverlay()
+        hideLoadingOverlay()
         if let start = navigationStartedAt {
             lastCommitSeconds = CFAbsoluteTimeGetCurrent() - start
         }
@@ -571,6 +666,7 @@ extension ChatWebController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         hideErrorOverlay()
+        hideLoadingOverlay()
         isPageReady = true
         if let start = navigationStartedAt {
             lastLoadSeconds = CFAbsoluteTimeGetCurrent() - start
@@ -602,6 +698,7 @@ extension ChatWebController: WKNavigationDelegate {
         if isBenign {
             // The previous page is still on screen, so keep serving bridge calls.
             if webView.url != nil {
+                hideLoadingOverlay()
                 isPageReady = true
                 flushPending()
             }
@@ -799,4 +896,45 @@ private final class ErrorOverlayView: NSView {
     required init?(coder: NSCoder) { fatalError("not supported") }
 
     @objc private func handleRetry() { retry() }
+}
+
+private final class LoadingOverlayView: NSView {
+    private let spinner = NSProgressIndicator()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.94).cgColor
+
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.isIndeterminate = true
+
+        let title = NSTextField(labelWithString: AppLocalization.text("正在加载 ChatGPT…", "Loading ChatGPT…"))
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.textColor = .labelColor
+
+        let stack = NSStackView(views: [spinner, title])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func startAnimating() {
+        spinner.startAnimation(nil)
+    }
+
+    func stopAnimating() {
+        spinner.stopAnimation(nil)
+    }
 }
