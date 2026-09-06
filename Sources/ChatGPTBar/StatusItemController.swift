@@ -28,7 +28,7 @@ final class StatusItemController {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "bubble.left.and.text.bubble.right", accessibilityDescription: AppInfo.name)
+            button.image = Self.menuBarImage()
                 ?? NSImage(systemSymbolName: "message", accessibilityDescription: AppInfo.name)
             button.image?.isTemplate = true
             button.toolTip = AppInfo.name
@@ -45,6 +45,16 @@ final class StatusItemController {
                 self.handlers.toggle()
             }
         }
+    }
+
+    private static func menuBarImage() -> NSImage? {
+        guard let path = Bundle.main.path(forResource: "MenuBarIcon", ofType: "pdf"),
+              let image = NSImage(contentsOfFile: path) else {
+            return nil
+        }
+        image.size = NSSize(width: 18, height: 18)
+        image.accessibilityDescription = AppInfo.name
+        return image
     }
 
     func setPinned(_ pinned: Bool) {
