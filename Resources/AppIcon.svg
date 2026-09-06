@@ -1,34 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <defs>
-    <linearGradient id="shell" x1="96" y1="64" x2="928" y2="960" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1e293b"/>
-      <stop offset="0.52" stop-color="#0f172a"/>
-      <stop offset="1" stop-color="#08111f"/>
-    </linearGradient>
-    <linearGradient id="panel" x1="250" y1="190" x2="750" y2="820" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#fffdf7"/>
-      <stop offset="1" stop-color="#e8edf2"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="24" stdDeviation="22" flood-color="#020617" flood-opacity="0.32"/>
-    </filter>
-  </defs>
-
-  <rect width="1024" height="1024" rx="224" fill="#020617"/>
-  <rect x="44" y="44" width="936" height="936" rx="202" fill="url(#shell)"/>
-  <path d="M132 158C196 88 302 60 430 60h164c176 0 298 52 366 158" fill="none" stroke="#334155" stroke-width="12" stroke-linecap="round" opacity=".55"/>
-
-  <g filter="url(#shadow)">
-    <path d="M220 286c0-63 51-114 114-114h330c63 0 114 51 114 114v284c0 63-51 114-114 114H500l-118 92c-25 20-61 3-61-29v-63h-15c-48 0-86-39-86-86V286z" fill="url(#panel)"/>
-  </g>
-
-  <path d="M322 392h302M322 486h216M322 580h132" fill="none" stroke="#1e293b" stroke-width="34" stroke-linecap="round"/>
-
-  <g transform="translate(694 190)">
-    <path d="M52 0l14 38 38 14-38 14-14 38-14-38L0 52l38-14L52 0z" fill="#38bdf8"/>
-    <path d="M122 74l8 22 22 8-22 8-8 22-8-22-22-8 22-8 8-22z" fill="#7dd3fc" opacity=".9"/>
-  </g>
-
-  <circle cx="842" cy="826" r="18" fill="#38bdf8" opacity=".9"/>
-  <circle cx="790" cy="864" r="8" fill="#7dd3fc" opacity=".8"/>
+  <rect width="1024" height="1024" rx="220" fill="#ffffff"/>
+  <path
+    d="M220 294c0-61 49-110 110-110h364c61 0 110 49 110 110v278c0 61-49 110-110 110H515l-125 96c-23 18-56 2-56-27v-69h-4c-61 0-110-49-110-110V294z"
+    fill="none"
+    stroke="#111111"
+    stroke-width="34"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M330 397h334M330 510h244M330 623h136"
+    fill="none"
+    stroke="#111111"
+    stroke-width="34"
+    stroke-linecap="round"
+  />
 </svg>
