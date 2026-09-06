@@ -1,17 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <rect width="1024" height="1024" rx="220" fill="#ffffff"/>
+  <rect width="1024" height="1024" rx="220" fill="#111111"/>
   <path
-    d="M220 294c0-61 49-110 110-110h364c61 0 110 49 110 110v278c0 61-49 110-110 110H515l-125 96c-23 18-56 2-56-27v-69h-4c-61 0-110-49-110-110V294z"
+    d="M220 294c0-61 49-110 110-110h364c61 0 110 49 110 110v278c0 61-49 110-110 110h-4v69c0 29-33 45-56 27l-125-96H330c-61 0-110-49-110-110V294z"
     fill="none"
-    stroke="#111111"
-    stroke-width="34"
+    stroke="#ffffff"
+    stroke-width="32"
     stroke-linejoin="round"
   />
   <path
-    d="M330 397h334M330 510h244M330 623h136"
+    d="M360 397h304M450 510h214M528 623h136"
     fill="none"
-    stroke="#111111"
-    stroke-width="34"
+    stroke="#ffffff"
+    stroke-width="32"
     stroke-linecap="round"
   />
 </svg>
